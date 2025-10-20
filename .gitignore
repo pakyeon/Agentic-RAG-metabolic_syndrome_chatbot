@@ -29,3 +29,4 @@ Thumbs.db
 *chromadb
 *.db
 metabolic_syndrome_data/
+*.sqlite
