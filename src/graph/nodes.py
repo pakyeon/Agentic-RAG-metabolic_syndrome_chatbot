@@ -53,3 +53,75 @@ def should_retrieve_node(state: RAGState) -> Dict:
             "iteration": state.get("iteration", 0) + 1,
             "error": f"검색 필요성 평가 실패: {str(e)}",
         }
+
+
+# === 내부 검색 (VectorDB Hybrid Search) ===
+def retrieve_internal_node(state: RAGState) -> Dict:
+    """VectorDB에서 관련 문서 검색"""
+    try:
+        from src.data.vector_store import load_vector_db, HybridRetriever
+
+        vector_store = load_vector_db()
+        retriever = HybridRetriever(vector_store)
+
+        # 환자 컨텍스트가 있으면 쿼리에 포함
+        query = state["question"]
+        if state.get("patient_context"):
+            query = f"{state['patient_context']}\n\n질문: {state['question']}"
+
+        docs = retriever.search(query, k=5)
+
+        return {"internal_docs": docs}
+
+    except Exception as e:
+        return {"internal_docs": [], "error": f"내부 검색 실패: {str(e)}"}
+
+
+# === Self-RAG ISREL: 검색 품질 평가 ===
+def evaluate_retrieval_node(state: RAGState) -> Dict:
+    """검색된 문서의 관련성 평가 (Self-RAG ISREL)"""
+    try:
+        from src.evaluation.self_rag_evaluator import SelfRAGEvaluator
+
+        evaluator = SelfRAGEvaluator()
+        docs = state.get("internal_docs", [])
+
+        if not docs:
+            return {"relevance_scores": []}
+
+        scores = [
+            evaluator.evaluate_relevance(doc.page_content, state["question"])
+            for doc in docs
+        ]
+
+        return {"relevance_scores": scores}
+
+    except Exception as e:
+        return {"relevance_scores": [], "error": f"검색 품질 평가 실패: {str(e)}"}
+
+
+# === CRAG: 액션 결정 ===
+def decide_crag_action_node(state: RAGState) -> Dict:
+    """CRAG 전략에 따른 액션 결정"""
+    try:
+        from src.strategies.corrective_rag import CorrectiveRAG
+
+        strategy = CorrectiveRAG()
+        docs = state.get("internal_docs", [])
+
+        if not docs:
+            return {"crag_action": "INCORRECT", "crag_confidence": 0.0}
+
+        action, reason = strategy.decide_action(query=state["question"], documents=docs)
+
+        return {
+            "crag_action": action.value,
+            "crag_confidence": 1.0,  # CorrectiveRAG에서 confidence 제공 안함
+        }
+
+    except Exception as e:
+        return {
+            "crag_action": "CORRECT",
+            "crag_confidence": 0.0,
+            "error": f"CRAG 액션 결정 실패: {str(e)}",
+        }

@@ -4,10 +4,16 @@ from src.graph.state import RAGState
 from src.graph.nodes import (
     load_patient_context_node,
     should_retrieve_node,
+    retrieve_internal_node,
+    evaluate_retrieval_node,
+    decide_crag_action_node,
 )
 
 __all__ = [
     "RAGState",
     "load_patient_context_node",
     "should_retrieve_node",
+    "retrieve_internal_node",
+    "evaluate_retrieval_node",
+    "decide_crag_action_node",
 ]
