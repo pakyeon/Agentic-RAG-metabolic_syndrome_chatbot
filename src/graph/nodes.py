@@ -14,15 +14,18 @@ def load_patient_context_node(state: RAGState) -> Dict:
         return {"patient_context": ""}
 
     try:
-        from src.data.patient_context import PatientContextProvider, PatientSession
+        from src.data.patient_context import PatientContextProvider
         from src.data.patient_db import PatientDatabase
 
         db = PatientDatabase()
-        session = PatientSession(db)
-        session.select_patient(patient_id)
+        provider = PatientContextProvider(db)
+        context = provider.get_patient_context(patient_id, format="detailed")
 
-        provider = PatientContextProvider(session)
-        context = provider.get_context(format_type="detailed")
+        if not context:
+            return {
+                "patient_context": "",
+                "error": f"환자 ID '{patient_id}' 정보를 찾을 수 없습니다",
+            }
 
         return {"patient_context": context}
 
