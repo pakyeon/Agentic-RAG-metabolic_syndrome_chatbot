@@ -13,7 +13,7 @@ class RAGState(TypedDict):
 
     # 입력
     question: str
-    patient_id: Optional[str]
+    patient_id: Optional[int]
 
     # 환자 정보
     patient_context: Optional[str]

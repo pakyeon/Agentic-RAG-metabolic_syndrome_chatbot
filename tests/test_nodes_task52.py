@@ -14,10 +14,10 @@ def test_load_patient_context_node():
     """환자 컨텍스트 로드 노드 테스트"""
     print("\n=== test_load_patient_context_node ===")
 
-    # Case 1: 환자 ID가 있는 경우
+    # Case 1: 환자 ID가 있는 경우 (정수형)
     state: RAGState = {
         "question": "혈압 관리 방법은?",
-        "patient_id": "P001",
+        "patient_id": 1,
         "patient_context": None,
         "should_retrieve": False,
         "relevance_scores": [],
@@ -140,7 +140,7 @@ def test_integration():
 
     state: RAGState = {
         "question": "복부비만 관리 방법을 알려주세요",
-        "patient_id": "P001",
+        "patient_id": 1,
         "patient_context": None,
         "should_retrieve": False,
         "relevance_scores": [],
