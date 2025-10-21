@@ -117,10 +117,14 @@ def test_evaluate_retrieval_node():
         print(f"❌ 에러 발생: {eval_result['error']}")
 
     scores = eval_result.get("relevance_scores", [])
-    print(f"관련성 점수: {scores}")
+    print(f"평가 결과: {len(scores)}개 문서")
 
     if scores:
-        print(f"평균 관련성: {sum(scores)/len(scores):.2f}/5.0")
+        # RelevanceResult는 객체이므로 relevance 속성 확인
+        relevant_count = sum(
+            1 for s in scores if hasattr(s, "relevance") and s.relevance == "relevant"
+        )
+        print(f"관련 문서: {relevant_count}/{len(scores)}")
         print("✅ 검색 품질 평가 테스트 통과")
     else:
         print("⚠️  평가 점수 없음")
@@ -182,7 +186,7 @@ def test_decide_crag_action_node():
     print(f"CRAG 액션: {action}")
     print(f"신뢰도: {confidence:.2f}")
 
-    assert action in ["CORRECT", "INCORRECT", "AMBIGUOUS"]
+    assert action in ["correct", "incorrect", "ambiguous"]
     print("✅ CRAG 액션 결정 테스트 통과")
 
 
@@ -235,7 +239,10 @@ def test_integration():
     state.update(result2)
     scores = state.get("relevance_scores", [])
     if scores:
-        print(f"   평균 관련성: {sum(scores)/len(scores):.2f}/5.0")
+        relevant_count = sum(
+            1 for s in scores if hasattr(s, "relevance") and s.relevance == "relevant"
+        )
+        print(f"   관련 문서: {relevant_count}/{len(scores)}")
 
     print("3. CRAG 액션 결정...")
     result3 = decide_crag_action_node(state)
@@ -245,7 +252,7 @@ def test_integration():
 
     assert state.get("internal_docs") is not None
     assert state.get("relevance_scores") is not None
-    assert state.get("crag_action") in ["CORRECT", "INCORRECT", "AMBIGUOUS"]
+    assert state.get("crag_action") in ["correct", "incorrect", "ambiguous"]
 
     print("✅ 통합 테스트 통과")
 

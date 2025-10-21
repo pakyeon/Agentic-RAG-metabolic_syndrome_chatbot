@@ -25,7 +25,7 @@ class RAGState(TypedDict):
     usefulness_score: float  # ISUSE: 답변 유용성 (1-5)
 
     # CRAG Strategy
-    crag_action: str  # CORRECT/INCORRECT/AMBIGUOUS
+    crag_action: str  # correct/incorrect/ambiguous
     crag_confidence: float  # 0-1
 
     # 검색 결과

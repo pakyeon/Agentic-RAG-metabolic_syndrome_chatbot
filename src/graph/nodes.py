@@ -60,9 +60,25 @@ def retrieve_internal_node(state: RAGState) -> Dict:
     """VectorDB에서 관련 문서 검색"""
     try:
         from src.data.vector_store import load_vector_db, HybridRetriever
+        from langchain_core.documents import Document
 
         vector_store = load_vector_db()
-        retriever = HybridRetriever(vector_store)
+
+        # VectorDB에서 모든 문서를 가져와서 BM25용으로 사용
+        # Note: 실제로는 _chunks가 캐시되어 있어야 하지만,
+        # 여기서는 VectorDB에서 모든 문서를 가져옴
+        all_docs_data = vector_store.get()
+        documents = [
+            Document(page_content=content, metadata=metadata)
+            for content, metadata in zip(
+                all_docs_data.get("documents", []), all_docs_data.get("metadatas", [])
+            )
+        ]
+
+        if not documents:
+            return {"internal_docs": [], "error": "VectorDB에 문서가 없습니다"}
+
+        retriever = HybridRetriever(vectorstore=vector_store, documents=documents)
 
         # 환자 컨텍스트가 있으면 쿼리에 포함
         query = state["question"]
@@ -110,7 +126,7 @@ def decide_crag_action_node(state: RAGState) -> Dict:
         docs = state.get("internal_docs", [])
 
         if not docs:
-            return {"crag_action": "INCORRECT", "crag_confidence": 0.0}
+            return {"crag_action": "incorrect", "crag_confidence": 0.0}
 
         action, reason = strategy.decide_action(query=state["question"], documents=docs)
 
@@ -121,7 +137,7 @@ def decide_crag_action_node(state: RAGState) -> Dict:
 
     except Exception as e:
         return {
-            "crag_action": "CORRECT",
+            "crag_action": "correct",
             "crag_confidence": 0.0,
             "error": f"CRAG 액션 결정 실패: {str(e)}",
         }
