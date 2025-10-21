@@ -115,73 +115,110 @@ class SelfRAGEvaluator:
         if context:
             prompt = f"""당신은 검색 필요성 판단자입니다.
 
-**질문**: {query}
+    **시스템 역할**:
+    이 시스템은 대사증후군 상담사를 어시스턴트하는 전문 챗봇입니다.
+    상담사가 환자 상담 시 필요한 전문 정보와 가이드라인을 제공합니다.
 
-**현재 컨텍스트**:
-{context}
+    **질문**: {query}
 
-**판단 기준**:
-1. 질문이 최신 정보나 특정 사실을 요구하는가?
-2. LLM의 일반 지식으로 충분히 답변 가능한가?
-3. 현재 컨텍스트에 추가 정보가 필요한가?
+    **현재 컨텍스트**:
+    {context}
 
-**출력 형식**:
-반드시 다음 중 하나만 출력하세요:
-- "yes" (외부 검색 필요)
-- "no" (LLM 지식으로 충분)
-- "continue" (현재 진행 중, 추가 검색 불필요)
+    **판단 기준**:
+    1. 질문이 대사증후군 상담에 필요한 전문 정보를 요구하는가?
+    - 대사증후군 관련 진단, 치료, 예방, 관리 방법
+    - 환자 상담에 필요한 생활습관 개선 (식단, 운동, 금연, 스트레스 관리 등)
+    - 위험 요인 평가 및 합병증 예방
+    → YES (내부 문서 검색 필요)
 
-그 다음 줄에 간단한 이유를 한 문장으로 작성하세요.
+    2. 질문이 단순 인사, 감사, 일상 대화인가?
+    → NO (검색 불필요)
 
-출력:"""
+    3. 현재 컨텍스트로 충분한가?
+    → CONTINUE (추가 검색 불필요)
+
+    **중요**: 
+    대사증후군 상담 맥락에서 전문적이고 구체적인 정보가 필요한지 판단하세요.
+    일반적인 건강 상식이 아닌, 상담사가 참고할 전문 자료가 필요한지 평가하세요.
+
+    **출력 형식**:
+    반드시 다음 중 하나만 출력하세요:
+    - "yes" (내부 문서 검색 필요)
+    - "no" (검색 불필요)
+    - "continue" (현재 컨텍스트로 충분)
+
+    그 다음 줄에 간단한 이유를 한 문장으로 작성하세요.
+
+    출력:"""
         else:
             prompt = f"""당신은 검색 필요성 판단자입니다.
 
-**질문**: {query}
+    **시스템 역할**:
+    이 시스템은 대사증후군 상담사를 어시스턴트하는 전문 챗봇입니다.
+    상담사가 환자 상담 시 필요한 전문 정보와 가이드라인을 제공합니다.
 
-**판단 기준**:
-1. 질문이 대사증후군 관련 의료 정보인가?
-2. 최신 연구나 특정 통계를 요구하는가?
-3. LLM의 일반 의료 지식으로 답변 가능한가?
+    **도메인 범위**:
+    대사증후군을 중심으로 진단, 치료, 식단, 운동, 금연, 스트레스 관리 등 
+    상담에 필요한 모든 영역을 포괄합니다.
 
-**출력 형식**:
-반드시 다음 중 하나만 출력하세요:
-- "yes" (외부 검색 필요)
-- "no" (LLM 지식으로 충분)
+    **질문**: {query}
 
-그 다음 줄에 간단한 이유를 한 문장으로 작성하세요.
+    **판단 기준**:
+    1. 질문이 대사증후군 환자 상담에 필요한 전문 정보를 요구하는가?
+    - 대사증후군과 관련된 진단, 평가, 치료 정보
+    - 환자 상담 시 제공할 생활습관 개선 가이드라인
+    - 위험 요인, 합병증, 예방 전략
+    - 환자 맞춤 관리 방법
+    → YES (전문 문서 검색 필요)
 
-출력:"""
+    2. 질문이 단순 인사나 일상 대화인가?
+    - "안녕하세요", "감사합니다", "좋은 하루 되세요" 등
+    → NO (검색 불필요)
 
-        response = self.llm.invoke(prompt)
-        result = response.content.strip().lower()
+    3. 질문이 대사증후군 도메인과 무관한 일반 주제인가?
+    - 날씨, 뉴스, 일반 상식 등
+    → NO (검색 불필요)
 
-        # 파싱: 첫 줄은 decision, 나머지는 reason
-        lines = result.split("\n", 1)
-        decision_line = lines[0].strip()
-        reason = lines[1].strip() if len(lines) > 1 else ""
+    **판단 포인트**:
+    - "상담사가 환자에게 전문적이고 근거 있는 정보를 제공하기 위해 문서 참조가 필요한가?"
+    - 일반 의학 상식과 전문 상담 가이드라인은 다릅니다.
 
-        # decision 파싱
-        if "yes" in decision_line and "no" not in decision_line:
+    **출력 형식**:
+    반드시 다음 중 하나만 출력하세요:
+    - "yes" (전문 문서 검색 필요)
+    - "no" (검색 불필요)
+
+    그 다음 줄에 간단한 이유를 한 문장으로 작성하세요.
+
+    출력:"""
+
+        messages = [{"role": "user", "content": prompt}]
+
+        response = self.llm.invoke(messages)
+        content = response.content.strip()
+
+        # 첫 줄: decision, 나머지: reason
+        lines = content.split("\n", 1)
+        decision_raw = lines[0].strip().lower()
+        reason = lines[1].strip() if len(lines) > 1 else "No reason provided"
+
+        # decision 정규화
+        if "yes" in decision_raw:
             decision = "yes"
-            confidence = 0.9
-        elif "no" in decision_line:
+            confidence = 1.0
+        elif "no" in decision_raw:
             decision = "no"
-            confidence = 0.9
-        elif "continue" in decision_line:
+            confidence = 1.0
+        elif "continue" in decision_raw:
             decision = "continue"
-            confidence = 0.9
+            confidence = 0.8
         else:
-            # 파싱 실패 시 보수적으로 검색 필요로 판단
+            # 기본값: 검색 수행
             decision = "yes"
             confidence = 0.5
-            reason = "판단 실패, 보수적으로 검색 필요"
+            reason = f"불명확한 응답: {decision_raw}"
 
-        return RetrieveResult(
-            decision=decision,
-            confidence=confidence,
-            reason=reason if reason else f"검색 {decision}",
-        )
+        return RetrieveResult(decision=decision, confidence=confidence, reason=reason)
 
     def evaluate_relevance(self, query: str, document: str) -> RelevanceResult:
         """
