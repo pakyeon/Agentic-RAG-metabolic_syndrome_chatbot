@@ -16,6 +16,7 @@ from .nodes import (
     generate_answer_node,
     evaluate_answer_node,
 )
+from .workflow import build_rag_graph, create_initial_state, run_rag
 
 __all__ = [
     "RAGState",
@@ -28,4 +29,7 @@ __all__ = [
     "merge_context_node",
     "generate_answer_node",
     "evaluate_answer_node",
+    "build_rag_graph",
+    "create_initial_state",
+    "run_rag",
 ]
