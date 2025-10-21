@@ -18,6 +18,17 @@ def test_retrieve_internal_node():
     """내부 검색 노드 테스트"""
     print("\n=== test_retrieve_internal_node ===")
 
+    # VectorDB 존재 확인
+    import os
+
+    chromadb_path = os.path.join(os.path.dirname(__file__), "..", "chromadb", "openai")
+
+    if not os.path.exists(chromadb_path):
+        print(f"⚠️  VectorDB가 구축되지 않았습니다: {chromadb_path}")
+        print("   Phase 1의 VectorDB 구축을 먼저 완료하세요.")
+        print("   테스트 스킵")
+        return
+
     state: RAGState = {
         "question": "대사증후군의 진단 기준은 무엇인가요?",
         "patient_id": None,
@@ -59,6 +70,15 @@ def test_retrieve_internal_node():
 def test_evaluate_retrieval_node():
     """검색 품질 평가 노드 테스트"""
     print("\n=== test_evaluate_retrieval_node ===")
+
+    # VectorDB 존재 확인
+    import os
+
+    chromadb_path = os.path.join(os.path.dirname(__file__), "..", "chromadb", "openai")
+
+    if not os.path.exists(chromadb_path):
+        print(f"⚠️  VectorDB가 구축되지 않았습니다. 테스트 스킵")
+        return
 
     # 먼저 검색 수행
     state: RAGState = {
@@ -112,6 +132,15 @@ def test_decide_crag_action_node():
     """CRAG 액션 결정 노드 테스트"""
     print("\n=== test_decide_crag_action_node ===")
 
+    # VectorDB 존재 확인
+    import os
+
+    chromadb_path = os.path.join(os.path.dirname(__file__), "..", "chromadb", "openai")
+
+    if not os.path.exists(chromadb_path):
+        print(f"⚠️  VectorDB가 구축되지 않았습니다. 테스트 스킵")
+        return
+
     state: RAGState = {
         "question": "고혈압 관리 방법은?",
         "patient_id": None,
@@ -160,6 +189,15 @@ def test_decide_crag_action_node():
 def test_integration():
     """세 노드 통합 테스트"""
     print("\n=== test_integration ===")
+
+    # VectorDB 존재 확인
+    import os
+
+    chromadb_path = os.path.join(os.path.dirname(__file__), "..", "chromadb", "openai")
+
+    if not os.path.exists(chromadb_path):
+        print(f"⚠️  VectorDB가 구축되지 않았습니다. 테스트 스킵")
+        return
 
     state: RAGState = {
         "question": "대사증후군 예방을 위한 식이요법은?",
@@ -213,9 +251,22 @@ def test_integration():
 
 
 if __name__ == "__main__":
+    import os
     from dotenv import load_dotenv
 
     load_dotenv()
+
+    chromadb_path = os.path.join(os.path.dirname(__file__), "..", "chromadb", "openai")
+
+    if not os.path.exists(chromadb_path):
+        print("\n" + "=" * 50)
+        print("⚠️  VectorDB가 구축되지 않았습니다!")
+        print("=" * 50)
+        print(f"경로: {os.path.abspath(chromadb_path)}")
+        print("\nPhase 1에서 VectorDB 구축을 먼저 완료하세요:")
+        print("  python -m src.data.vector_store")
+        print("=" * 50)
+
     test_retrieve_internal_node()
     test_evaluate_retrieval_node()
     test_decide_crag_action_node()
