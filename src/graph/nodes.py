@@ -40,11 +40,28 @@ def should_retrieve_node(state: RAGState) -> Dict:
         from src.evaluation.self_rag_evaluator import SelfRAGEvaluator
 
         evaluator = SelfRAGEvaluator()
-        should_retrieve = evaluator.evaluate_retrieve_need(state["question"])
+        result = evaluator.evaluate_retrieve_need(state["question"])
+
+        # RetrieveResult 객체에서 decision 추출
+        # decision: "yes" | "no" | "continue"
+        #
+        # 현재 구현 (Task 6.2):
+        #   - "yes": 새로운 검색 필요 → True
+        #   - "no": 검색 불필요 (직접 답변) → False
+        #   - "continue": 이전 컨텍스트 재사용 → False (현재는 no와 동일하게 처리)
+        #
+        # 향후 확장 (Task 6.4 재생성 루프):
+        #   - "continue"를 별도 처리하여 이전 검색 결과 재사용 가능
+        should_retrieve = result.decision == "yes"
 
         return {
             "should_retrieve": should_retrieve,
             "iteration": state.get("iteration", 0) + 1,
+            "metadata": {
+                **state.get("metadata", {}),
+                "retrieve_decision": result.decision,  # 원본 decision 보존
+                "retrieve_reason": result.reason,
+            },
         }
 
     except Exception as e:
