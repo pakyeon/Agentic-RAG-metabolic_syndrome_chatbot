@@ -24,13 +24,26 @@ from .document_loader import (
 )
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_PERSIST_DIRECTORY = PROJECT_ROOT / "chromadb" / "openai"
+DEFAULT_PARSED_DIRECTORY = PROJECT_ROOT / "metabolic_syndrome_data" / "parsed"
+DEFAULT_RAW_DIRECTORY = PROJECT_ROOT / "metabolic_syndrome_data" / "raw"
+
+
+def project_path(path: str | Path) -> Path:
+    candidate = Path(path).expanduser()
+    return (
+        candidate if candidate.is_absolute() else (PROJECT_ROOT / candidate).resolve()
+    )
+
+
 class VectorStoreBuilder:
     """VectorDB 빌더 + Hybrid Search 통합"""
 
     def __init__(
         self,
         embedding_model: str = "text-embedding-3-small",
-        persist_directory: str = "../../chromadb/openai",
+        persist_directory: str | Path = DEFAULT_PERSIST_DIRECTORY,
         collection_name: str = "metabolic_syndrome",
     ):
         """
@@ -40,7 +53,7 @@ class VectorStoreBuilder:
             collection_name: 컬렉션 이름
         """
         self.embedding_model = embedding_model
-        self.persist_directory = Path(persist_directory)
+        self.persist_directory = project_path(persist_directory)
         self.collection_name = collection_name
         self._chunks = None  # Hybrid Search용 문서 저장
 
@@ -54,8 +67,8 @@ class VectorStoreBuilder:
 
     def build(
         self,
-        parsed_dir: str,
-        raw_dir: Optional[str] = None,
+        parsed_dir: str | Path,
+        raw_dir: Optional[str | Path] = None,
         chunk_size: int = 500,
         chunk_overlap: int = 50,
         batch_size: int = 100,
@@ -91,6 +104,9 @@ class VectorStoreBuilder:
 
         # Step 1: 문서 로드 (Task 1.2)
         print("Step 1/4: 문서 로드")
+        parsed_dir = project_path(parsed_dir)
+        raw_dir = project_path(raw_dir) if raw_dir else None
+
         loader = MetabolicSyndromeDocumentLoader(parsed_dir=parsed_dir, raw_dir=raw_dir)
         documents = loader.load_documents()
 
@@ -186,8 +202,8 @@ class VectorStoreBuilder:
         self,
         vectorstore: Optional[Chroma] = None,
         documents: Optional[List[Document]] = None,
-        parsed_dir: Optional[str] = None,
-        raw_dir: Optional[str] = None,
+        parsed_dir: Optional[str | Path] = None,
+        raw_dir: Optional[str | Path] = None,
         bm25_weight: float = 0.5,
         vector_weight: float = 0.5,
         k: int = 5,
@@ -223,6 +239,9 @@ class VectorStoreBuilder:
                         "documents와 parsed_dir 둘 다 None입니다. "
                         "하나는 제공해야 합니다."
                     )
+
+                parsed_dir = project_path(parsed_dir)
+                raw_dir = project_path(raw_dir) if raw_dir else None
 
                 print(f"[Info] 문서 재로드 중: {parsed_dir}")
                 loader = MetabolicSyndromeDocumentLoader(
@@ -400,7 +419,7 @@ class HybridRetriever:
 def build_vector_db(
     parsed_dir: str,
     raw_dir: Optional[str] = None,
-    persist_directory: str = "../../chromadb/openai",
+    persist_directory: str | Path = DEFAULT_PERSIST_DIRECTORY,
     chunk_size: int = 500,
     chunk_overlap: int = 50,
     force_rebuild: bool = False,
@@ -429,7 +448,7 @@ def build_vector_db(
     )
 
 
-def load_vector_db(persist_directory: str = "../../chromadb/openai") -> Chroma:
+def load_vector_db(persist_directory: str | Path = DEFAULT_PERSIST_DIRECTORY) -> Chroma:
     """기존 VectorDB 로드 헬퍼 함수
 
     Args:
@@ -444,9 +463,9 @@ def load_vector_db(persist_directory: str = "../../chromadb/openai") -> Chroma:
 
 
 def create_hybrid_retriever(
-    persist_directory: str = "../../chromadb/openai",
-    parsed_dir: Optional[str] = None,
-    raw_dir: Optional[str] = None,
+    persist_directory: str | Path = DEFAULT_PERSIST_DIRECTORY,
+    parsed_dir: Optional[str | Path] = None,
+    raw_dir: Optional[str | Path] = None,
     bm25_weight: float = 0.5,
     vector_weight: float = 0.5,
     k: int = 5,
@@ -483,9 +502,9 @@ def test_build():
     print("\n=== Task 1.3: VectorDB 구축 테스트 ===\n")
 
     # 경로 설정
-    parsed_dir = "../../metabolic_syndrome_data/parsed"
-    raw_dir = "../../metabolic_syndrome_data/raw"
-    persist_dir = "../../chromadb/openai"
+    parsed_dir = DEFAULT_PARSED_DIRECTORY
+    raw_dir = DEFAULT_RAW_DIRECTORY
+    persist_dir = DEFAULT_PERSIST_DIRECTORY
 
     # 빌더 초기화
     builder = VectorStoreBuilder(persist_directory=persist_dir)
@@ -551,8 +570,8 @@ def test_load_and_hybrid():
     """기존 DB 로드 후 Hybrid 생성 테스트"""
     print("\n=== 로드 후 Hybrid 생성 테스트 ===\n")
 
-    persist_dir = "../../chromadb/openai"
-    parsed_dir = "../../metabolic_syndrome_data/parsed"
+    persist_dir = DEFAULT_PERSIST_DIRECTORY
+    parsed_dir = DEFAULT_PARSED_DIRECTORY
 
     # 헬퍼 함수로 Hybrid 생성
     hybrid = create_hybrid_retriever(
@@ -586,8 +605,8 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # 경로 확인
-    parsed_dir = "../../metabolic_syndrome_data/parsed"
-    if not os.path.exists(parsed_dir):
+    parsed_dir = DEFAULT_PARSED_DIRECTORY
+    if not parsed_dir.exists():
         print(f"❌ Error: parsed/ 디렉토리를 찾을 수 없습니다: {parsed_dir}")
         sys.exit(1)
 
