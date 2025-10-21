@@ -23,6 +23,8 @@ from src.graph.nodes import (
 
 
 # === Task 6.2: Self-RAG 조건부 엣지 ===
+
+
 def route_retrieve(state: RAGState) -> Literal["retrieve_internal", "generate_answer"]:
     """
     Self-RAG [Retrieve] 토큰 기반 분기
@@ -43,6 +45,8 @@ def route_retrieve(state: RAGState) -> Literal["retrieve_internal", "generate_an
 
 
 # === Task 6.3: CRAG 조건부 엣지 ===
+
+
 def route_crag_action(state: RAGState) -> Literal["search_external", "merge_context"]:
     """
     CRAG 액션에 따른 분기
@@ -67,6 +71,34 @@ def route_crag_action(state: RAGState) -> Literal["search_external", "merge_cont
         return "search_external"
 
 
+# === Task 6.4: Self-RAG 재생성 루프 ===
+
+
+def route_regeneration(state: RAGState) -> Literal["retrieve_internal", "__end__"]:
+    """
+    Self-RAG 답변 품질 평가 후 재생성 판단
+
+    - needs_regeneration=True AND iteration < max_iterations → 재검색
+    - 아니면 → END
+
+    Args:
+        state: 현재 그래프 상태
+
+    Returns:
+        다음 노드 이름 또는 "__end__"
+    """
+    needs_regen = state.get("needs_regeneration", False)
+    iteration = state.get("iteration", 0)
+    max_iterations = state.get("max_iterations", 2)
+
+    if needs_regen and iteration < max_iterations:
+        # 재생성 필요 & 최대 반복 횟수 미만 → 재검색
+        return "retrieve_internal"
+    else:
+        # 품질 충분 또는 최대 반복 도달 → 종료
+        return "__end__"
+
+
 def build_rag_graph():
     """
     Self-CRAG 기반 Agentic RAG 그래프 생성
@@ -74,6 +106,7 @@ def build_rag_graph():
     Task 6.1: 기본 순차 연결
     Task 6.2: Self-RAG [Retrieve] 조건부 엣지 추가
     Task 6.3: CRAG 조건부 엣지 추가
+    Task 6.4: Self-RAG 재생성 루프 추가
 
     Returns:
         CompiledGraph: 컴파일된 LangGraph
@@ -126,9 +159,18 @@ def build_rag_graph():
     # 병합 → 답변 생성
     workflow.add_edge("merge_context", "generate_answer")
 
-    # 답변 생성 → 평가 → 종료
+    # 답변 생성 → 평가
     workflow.add_edge("generate_answer", "evaluate_answer")
-    workflow.add_edge("evaluate_answer", END)
+
+    # Task 6.4: 재생성 루프
+    workflow.add_conditional_edges(
+        "evaluate_answer",
+        route_regeneration,
+        {
+            "retrieve_internal": "retrieve_internal",
+            "__end__": END,
+        },
+    )
 
     # 컴파일
     app = workflow.compile()
