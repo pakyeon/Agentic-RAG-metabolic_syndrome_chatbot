@@ -30,3 +30,6 @@ Thumbs.db
 *.db
 metabolic_syndrome_data/
 *.sqlite
+
+# Neo4j 데이터
+neo4j_data/
