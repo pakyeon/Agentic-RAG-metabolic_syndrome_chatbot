@@ -13,6 +13,8 @@ from .nodes import (
     decide_crag_action_node,
     search_external_node,
     merge_context_node,
+    generate_answer_node,
+    evaluate_answer_node,
 )
 
 __all__ = [
@@ -24,4 +26,6 @@ __all__ = [
     "decide_crag_action_node",
     "search_external_node",
     "merge_context_node",
+    "generate_answer_node",
+    "evaluate_answer_node",
 ]

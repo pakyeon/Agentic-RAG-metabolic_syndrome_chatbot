@@ -323,3 +323,198 @@ def merge_context_node(state: RAGState) -> Dict:
 
     except Exception as e:
         return {"merged_context": "", "error": f"컨텍스트 병합 실패: {str(e)}"}
+
+
+# === Task 5.5: 답변 생성 및 평가 ===
+
+
+def generate_answer_node(state: RAGState) -> Dict:
+    """
+    LLM으로 최종 답변 생성 노드 (Task 5.5)
+
+    merged_context와 patient_context를 활용하여 답변을 생성합니다.
+    """
+    try:
+        from langchain_openai import ChatOpenAI
+        import os
+
+        question = state["question"]
+        merged_context = state.get("merged_context", "")
+        patient_context = state.get("patient_context", "")
+
+        # 컨텍스트가 없으면 에러
+        if not merged_context:
+            return {
+                "answer": "죄송합니다. 관련 정보를 찾을 수 없어 답변을 생성할 수 없습니다.",
+                "error": "merged_context가 비어있음",
+            }
+
+        # LLM 초기화
+        llm = ChatOpenAI(
+            model="gpt-5-mini",
+            temperature=0.3,
+            reasoning_effort="minimal",
+            api_key=os.getenv("OPENAI_API_KEY"),
+        )
+
+        # 프롬프트 구성
+        system_prompt = """당신은 대사증후군 전문 의료 AI 어시스턴트입니다.
+
+**역할:**
+- 환자의 질문에 정확하고 이해하기 쉽게 답변
+- 제공된 컨텍스트를 바탕으로 근거 있는 답변 제공
+- 환자의 상태를 고려한 맞춤형 조언
+
+**답변 원칙:**
+1. 컨텍스트에 근거하여 답변 (추측 금지)
+2. 의료 용어는 쉬운 말로 설명
+3. 환자 정보가 있으면 개인화된 조언
+4. 중요한 정보는 명확히 강조
+5. 필요시 의사 상담 권장
+
+**답변 형식:**
+- 간결하고 구조화된 답변
+- 불릿 포인트 사용 가능
+- 핵심 정보 먼저 제공"""
+
+        # 환자 정보 포함 여부에 따라 user_prompt 구성
+        if patient_context:
+            user_prompt = f"""**환자 정보:**
+{patient_context}
+
+**참고 자료:**
+{merged_context}
+
+**질문:**
+{question}
+
+위 정보를 바탕으로 환자에게 맞춤형 답변을 제공하세요."""
+        else:
+            user_prompt = f"""**참고 자료:**
+{merged_context}
+
+**질문:**
+{question}
+
+위 정보를 바탕으로 답변을 제공하세요."""
+
+        # LLM 호출
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        response = llm.invoke(messages)
+        answer = response.content
+
+        return {"answer": answer}
+
+    except Exception as e:
+        import traceback
+
+        error_msg = f"답변 생성 실패: {str(e)}\n{traceback.format_exc()}"
+        return {
+            "answer": "죄송합니다. 답변 생성 중 오류가 발생했습니다.",
+            "error": error_msg,
+        }
+
+
+def evaluate_answer_node(state: RAGState) -> Dict:
+    """
+    Self-RAG 답변 평가 노드 (Task 5.5)
+
+    ISSUP (지원도)와 ISUSE (유용성)를 평가하여 답변 품질을 판단합니다.
+    """
+    try:
+        from src.evaluation.self_rag_evaluator import create_evaluator
+
+        question = state["question"]
+        answer = state.get("answer", "")
+        merged_context = state.get("merged_context", "")
+        iteration = state.get("iteration", 1)
+        max_iterations = state.get("max_iterations", 2)
+
+        # 답변이 없으면 재생성 필요
+        if not answer or not merged_context:
+            return {
+                "support_score": 0.0,
+                "usefulness_score": 0.0,
+                "needs_regeneration": True,
+            }
+
+        # Self-RAG 평가자 생성
+        evaluator = create_evaluator()
+
+        # merged_context를 문서 리스트로 변환
+        # merged_context는 "[문서 N] 제목\n내용" 형식이므로 분리
+        context_parts = merged_context.split("\n\n")
+        documents = []
+        for part in context_parts:
+            # "[문서 N]" 헤더 제거
+            lines = part.split("\n", 1)
+            if len(lines) > 1:
+                documents.append(lines[1])  # 헤더 제외하고 내용만
+            else:
+                documents.append(part)
+
+        # 빈 문서 필터링
+        documents = [doc for doc in documents if doc.strip()]
+
+        if not documents:
+            return {
+                "support_score": 0.0,
+                "usefulness_score": 0.0,
+                "needs_regeneration": True,
+            }
+
+        # ISSUP & ISUSE 평가
+        answer_quality = evaluator.evaluate_answer_quality(
+            query=question, answer=answer, documents=documents
+        )
+
+        # 점수 추출
+        # support_results: List[SupportResult]
+        support_results = answer_quality["support_results"]
+        usefulness_result = answer_quality["usefulness"]
+
+        # 지원도 점수 계산 (평균)
+        support_score = 0.0
+        if support_results:
+            support_scores = []
+            for s in support_results:
+                if s.support == "fully_supported":
+                    support_scores.append(5.0)
+                elif s.support == "partially_supported":
+                    support_scores.append(3.0)
+                else:  # no_support
+                    support_scores.append(1.0)
+            support_score = sum(support_scores) / len(support_scores)
+
+        # 유용성 점수
+        usefulness_score = float(usefulness_result.score)
+
+        # 재생성 필요 판단
+        needs_regeneration = False
+
+        # 조건: 점수가 낮고 아직 반복 가능
+        if (
+            support_score < 3.0 or usefulness_score < 3.0
+        ) and iteration < max_iterations:
+            needs_regeneration = True
+
+        return {
+            "support_score": support_score,
+            "usefulness_score": usefulness_score,
+            "needs_regeneration": needs_regeneration,
+        }
+
+    except Exception as e:
+        import traceback
+
+        error_msg = f"답변 평가 실패: {str(e)}\n{traceback.format_exc()}"
+        return {
+            "support_score": 0.0,
+            "usefulness_score": 0.0,
+            "needs_regeneration": False,
+            "error": error_msg,
+        }
