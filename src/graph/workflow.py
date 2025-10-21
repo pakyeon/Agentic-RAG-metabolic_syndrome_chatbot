@@ -22,9 +22,7 @@ from src.graph.nodes import (
 )
 
 
-# === Task 6.2: 조건부 엣지 함수 ===
-
-
+# === Task 6.2: Self-RAG 조건부 엣지 ===
 def route_retrieve(state: RAGState) -> Literal["retrieve_internal", "generate_answer"]:
     """
     Self-RAG [Retrieve] 토큰 기반 분기
@@ -44,12 +42,38 @@ def route_retrieve(state: RAGState) -> Literal["retrieve_internal", "generate_an
         return "generate_answer"
 
 
+# === Task 6.3: CRAG 조건부 엣지 ===
+def route_crag_action(state: RAGState) -> Literal["search_external", "merge_context"]:
+    """
+    CRAG 액션에 따른 분기
+
+    - CORRECT: 내부 문서만 사용 → 외부 검색 스킵 → merge_context
+    - INCORRECT: 외부 검색으로 교체 → search_external → merge_context
+    - AMBIGUOUS: 내부+외부 병합 → search_external → merge_context
+
+    Args:
+        state: 현재 그래프 상태
+
+    Returns:
+        다음 노드 이름
+    """
+    action = state.get("crag_action", "correct").lower()
+
+    if action == "correct":
+        # CORRECT: 내부 문서 품질 충분 → 외부 검색 스킵
+        return "merge_context"
+    else:
+        # INCORRECT or AMBIGUOUS: 외부 검색 필요
+        return "search_external"
+
+
 def build_rag_graph():
     """
     Self-CRAG 기반 Agentic RAG 그래프 생성
 
     Task 6.1: 기본 순차 연결
     Task 6.2: Self-RAG [Retrieve] 조건부 엣지 추가
+    Task 6.3: CRAG 조건부 엣지 추가
 
     Returns:
         CompiledGraph: 컴파일된 LangGraph
@@ -85,8 +109,21 @@ def build_rag_graph():
     # 검색 수행 경로
     workflow.add_edge("retrieve_internal", "evaluate_retrieval")
     workflow.add_edge("evaluate_retrieval", "decide_crag_action")
-    workflow.add_edge("decide_crag_action", "search_external")
+
+    # Task 6.3: CRAG 조건부 분기
+    workflow.add_conditional_edges(
+        "decide_crag_action",
+        route_crag_action,
+        {
+            "search_external": "search_external",
+            "merge_context": "merge_context",
+        },
+    )
+
+    # 외부 검색 → 병합
     workflow.add_edge("search_external", "merge_context")
+
+    # 병합 → 답변 생성
     workflow.add_edge("merge_context", "generate_answer")
 
     # 답변 생성 → 평가 → 종료
