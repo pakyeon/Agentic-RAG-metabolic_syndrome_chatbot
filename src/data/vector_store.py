@@ -22,19 +22,12 @@ from .document_loader import (
     MetabolicSyndromeDocumentLoader,
     MetabolicSyndromeChunker,
 )
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_PERSIST_DIRECTORY = PROJECT_ROOT / "chromadb" / "openai"
-DEFAULT_PARSED_DIRECTORY = PROJECT_ROOT / "metabolic_syndrome_data" / "parsed"
-DEFAULT_RAW_DIRECTORY = PROJECT_ROOT / "metabolic_syndrome_data" / "raw"
-
-
-def project_path(path: str | Path) -> Path:
-    candidate = Path(path).expanduser()
-    return (
-        candidate if candidate.is_absolute() else (PROJECT_ROOT / candidate).resolve()
-    )
+from .path_utils import (
+    DEFAULT_PARSED_DIRECTORY,
+    DEFAULT_PERSIST_DIRECTORY,
+    DEFAULT_RAW_DIRECTORY,
+    project_path,
+)
 
 
 class VectorStoreBuilder:
@@ -53,7 +46,10 @@ class VectorStoreBuilder:
             collection_name: 컬렉션 이름
         """
         self.embedding_model = embedding_model
-        self.persist_directory = project_path(persist_directory)
+        persist_path = project_path(persist_directory)
+        if persist_path is None:
+            raise ValueError("persist_directory cannot be None")
+        self.persist_directory = persist_path
         self.collection_name = collection_name
         self._chunks = None  # Hybrid Search용 문서 저장
 
@@ -104,10 +100,15 @@ class VectorStoreBuilder:
 
         # Step 1: 문서 로드 (Task 1.2)
         print("Step 1/4: 문서 로드")
-        parsed_dir = project_path(parsed_dir)
-        raw_dir = project_path(raw_dir) if raw_dir else None
+        parsed_path = project_path(parsed_dir)
+        raw_path = project_path(raw_dir) if raw_dir else None
 
-        loader = MetabolicSyndromeDocumentLoader(parsed_dir=parsed_dir, raw_dir=raw_dir)
+        if parsed_path is None:
+            raise ValueError("parsed_dir is required")
+
+        loader = MetabolicSyndromeDocumentLoader(
+            parsed_dir=parsed_path, raw_dir=raw_path
+        )
         documents = loader.load_documents()
 
         if not documents:
@@ -240,12 +241,15 @@ class VectorStoreBuilder:
                         "하나는 제공해야 합니다."
                     )
 
-                parsed_dir = project_path(parsed_dir)
-                raw_dir = project_path(raw_dir) if raw_dir else None
+                parsed_path = project_path(parsed_dir)
+                raw_path = project_path(raw_dir) if raw_dir else None
 
-                print(f"[Info] 문서 재로드 중: {parsed_dir}")
+                if parsed_path is None:
+                    raise ValueError("parsed_dir is required")
+
+                print(f"[Info] 문서 재로드 중: {parsed_path}")
                 loader = MetabolicSyndromeDocumentLoader(
-                    parsed_dir=parsed_dir, raw_dir=raw_dir
+                    parsed_dir=parsed_path, raw_dir=raw_path
                 )
                 docs = loader.load_documents()
 

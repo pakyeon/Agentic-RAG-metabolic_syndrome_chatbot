@@ -23,6 +23,13 @@ from langchain_text_splitters import (
     RecursiveCharacterTextSplitter,
 )
 
+from .path_utils import (
+    DEFAULT_PARSED_DIRECTORY,
+    DEFAULT_RAW_DIRECTORY,
+    PathLike,
+    project_path,
+)
+
 
 class MetabolicSyndromeDocumentLoader:
     """대사증후군 MD 문서 로더"""
@@ -32,8 +39,8 @@ class MetabolicSyndromeDocumentLoader:
 
     def __init__(
         self,
-        parsed_dir: str,
-        raw_dir: Optional[str] = None,
+        parsed_dir: PathLike,
+        raw_dir: Optional[PathLike] = None,
         min_content_length: int = 30,
     ):
         """
@@ -42,12 +49,16 @@ class MetabolicSyndromeDocumentLoader:
             raw_dir: 원본 PDF 파일 디렉토리 (선택)
             min_content_length: 최소 컨텐츠 길이 (짧은 청크 필터링)
         """
-        self.parsed_dir = Path(parsed_dir)
-        self.raw_dir = Path(raw_dir) if raw_dir else None
+        parsed_path = project_path(parsed_dir)
+        if parsed_path is None:
+            raise ValueError("parsed_dir is required")
+
+        self.parsed_dir = parsed_path
+        self.raw_dir = project_path(raw_dir) if raw_dir else None
         self.min_content_length = min_content_length
 
         if not self.parsed_dir.exists():
-            raise ValueError(f"parsed_dir이 존재하지 않습니다: {parsed_dir}")
+            raise ValueError(f"parsed_dir이 존재하지 않습니다: {self.parsed_dir}")
 
         print(f"[Document Loader] 초기화 완료")
         print(f"  - Parsed 디렉토리: {self.parsed_dir}")
@@ -322,8 +333,8 @@ def test_document_loader():
     print("\n=== Task 1.2: 문서 로드 테스트 ===\n")
 
     # 경로 설정 (기존 프로젝트 구조)
-    parsed_dir = "../../metabolic_syndrome_data/parsed"  # 실제 경로로 변경
-    raw_dir = "../../metabolic_syndrome_data/raw"
+    parsed_dir = DEFAULT_PARSED_DIRECTORY
+    raw_dir = DEFAULT_RAW_DIRECTORY
 
     # 로더 초기화
     loader = MetabolicSyndromeDocumentLoader(parsed_dir=parsed_dir, raw_dir=raw_dir)
@@ -388,8 +399,8 @@ def test_full_pipeline():
     """전체 파이프라인 테스트"""
     print("\n=== 전체 파이프라인 테스트 ===\n")
 
-    parsed_dir = "../../metabolic_syndrome_data/parsed"
-    raw_dir = "../../metabolic_syndrome_data/raw"
+    parsed_dir = DEFAULT_PARSED_DIRECTORY
+    raw_dir = DEFAULT_RAW_DIRECTORY
 
     # 1. 로드
     loader = MetabolicSyndromeDocumentLoader(parsed_dir, raw_dir)
@@ -426,11 +437,11 @@ if __name__ == "__main__":
     import sys
 
     # 경로 확인
-    parsed_dir = "../../metabolic_syndrome_data/parsed"
-    if not os.path.exists(parsed_dir):
+    parsed_dir = DEFAULT_PARSED_DIRECTORY
+    if not parsed_dir.exists():
         print(f"❌ Error: parsed/ 디렉토리를 찾을 수 없습니다: {parsed_dir}")
         print("\n경로를 수정하거나 심볼릭 링크를 생성하세요:")
-        print(f"  ln -s ../../metabolic_syndrome_data .")
+        print(f"  ln -s {DEFAULT_PARSED_DIRECTORY.parent} ./metabolic_syndrome_data")
         sys.exit(1)
 
     # 기본 테스트
