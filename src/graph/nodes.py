@@ -330,9 +330,10 @@ def merge_context_node(state: RAGState) -> Dict:
 
 def generate_answer_node(state: RAGState) -> Dict:
     """
-    LLM으로 최종 답변 생성 노드 (Task 5.5)
+    LLM으로 최종 답변 생성 노드 (Task 5.5 + Task 6.2)
 
     merged_context와 patient_context를 활용하여 답변을 생성합니다.
+    검색을 스킵한 경우(merged_context 없음)에는 LLM 자체 지식으로 답변합니다.
     """
     try:
         from langchain_openai import ChatOpenAI
@@ -342,13 +343,6 @@ def generate_answer_node(state: RAGState) -> Dict:
         merged_context = state.get("merged_context", "")
         patient_context = state.get("patient_context", "")
 
-        # 컨텍스트가 없으면 에러
-        if not merged_context:
-            return {
-                "answer": "죄송합니다. 관련 정보를 찾을 수 없어 답변을 생성할 수 없습니다.",
-                "error": "merged_context가 비어있음",
-            }
-
         # LLM 초기화
         llm = ChatOpenAI(
             model="gpt-5-mini",
@@ -357,8 +351,9 @@ def generate_answer_node(state: RAGState) -> Dict:
             api_key=os.getenv("OPENAI_API_KEY"),
         )
 
-        # 프롬프트 구성
-        system_prompt = """당신은 대사증후군 전문 의료 AI 어시스턴트입니다.
+        # Case 1: 검색을 수행한 경우 (merged_context 있음)
+        if merged_context:
+            system_prompt = """당신은 대사증후군 전문 의료 AI 어시스턴트입니다.
 
 **역할:**
 - 환자의 질문에 정확하고 이해하기 쉽게 답변
@@ -377,9 +372,9 @@ def generate_answer_node(state: RAGState) -> Dict:
 - 불릿 포인트 사용 가능
 - 핵심 정보 먼저 제공"""
 
-        # 환자 정보 포함 여부에 따라 user_prompt 구성
-        if patient_context:
-            user_prompt = f"""**환자 정보:**
+            # 환자 정보 포함 여부에 따라 user_prompt 구성
+            if patient_context:
+                user_prompt = f"""**환자 정보:**
 {patient_context}
 
 **참고 자료:**
@@ -389,14 +384,43 @@ def generate_answer_node(state: RAGState) -> Dict:
 {question}
 
 위 정보를 바탕으로 환자에게 맞춤형 답변을 제공하세요."""
-        else:
-            user_prompt = f"""**참고 자료:**
+            else:
+                user_prompt = f"""**참고 자료:**
 {merged_context}
 
 **질문:**
 {question}
 
 위 정보를 바탕으로 답변을 제공하세요."""
+
+        # Case 2: 검색을 스킵한 경우 (merged_context 없음) - Self-RAG [Retrieve] = no
+        else:
+            system_prompt = """당신은 대사증후군 전문 의료 AI 어시스턴트입니다.
+
+**역할:**
+- 일반적인 의료 지식으로 답변 가능한 질문에 답변
+- 친절하고 이해하기 쉽게 설명
+- 필요시 전문의 상담 권장
+
+**답변 원칙:**
+1. 명확하고 정확한 일반 의료 지식 제공
+2. 의료 용어는 쉬운 말로 설명
+3. 불확실한 내용은 전문의 상담 권장
+4. 간결하고 구조화된 답변"""
+
+            if patient_context:
+                user_prompt = f"""**환자 정보:**
+{patient_context}
+
+**질문:**
+{question}
+
+일반적인 의료 지식을 바탕으로 답변을 제공하세요."""
+            else:
+                user_prompt = f"""**질문:**
+{question}
+
+일반적인 의료 지식을 바탕으로 답변을 제공하세요."""
 
         # LLM 호출
         messages = [
