@@ -514,7 +514,7 @@ python examples/cli_simple.py
 - **LangChain**: RAG 파이프라인 및 체인 구성
 
 ### AI/ML
-- **LLM**: OpenAI GPT-4o (답변 생성 및 평가)
+- **LLM**: OpenAI GPT-5-mini (답변 생성 및 평가)
 - **Embedding**: OpenAI text-embedding-3-small
 
 ### Data & Search
