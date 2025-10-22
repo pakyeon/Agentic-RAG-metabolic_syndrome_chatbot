@@ -1,0 +1,26 @@
+# Core Framework
+langchain==0.3.27
+langchain-core==0.3.79
+langchain-community==0.4
+langgraph==1.0.1
+
+# LangChain Integrations
+langchain-openai==0.3.35
+langchain-chroma==1.0.0
+langchain-tavily==0.2.12
+langchain-text-splitters==0.3.11
+
+# AI/ML
+openai==2.6.0
+
+# Vector Database
+chromadb==1.2.1
+
+# Utilities
+python-dotenv==1.1.1
+tqdm==4.67.1
+numpy==2.3.4
+pydantic==2.12.3
+
+# HTTP (for testing)
+requests==2.32.5
