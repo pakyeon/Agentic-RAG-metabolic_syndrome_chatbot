@@ -1,15 +1,9 @@
 """
 Self-RAG 평가자
-
-Self-RAG 논문의 4가지 Reflection Tokens를 프롬프트 기반으로 구현:
-- [Retrieve]: 검색 필요성 판단
-- ISREL: 검색 문서의 관련성 평가
-- ISSUP: 생성 답변의 지지도 평가
-- ISUSE: 답변의 유용성 평가
 """
 
 import os
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from langchain_openai import ChatOpenAI
 
@@ -53,7 +47,7 @@ class DocumentEvaluation:
 
     document_content: str
     relevance: RelevanceResult
-    support: Optional[SupportResult] = None  # 답변 생성 전에는 None
+    support: Optional[SupportResult] = None
 
 
 @dataclass
@@ -64,14 +58,34 @@ class OverallEvaluation:
     document_evaluations: List[DocumentEvaluation]
     should_retrieve_external: bool
     reason: str
+    early_stopped: bool = False
+    crag_action: Optional[str] = None
+
+
+@dataclass
+class CombinedRelevanceResult:
+    """ISREL + CRAG 통합 결과"""
+
+    doc_id: int
+    relevance: str  # "relevant" | "irrelevant"
+    confidence: float
+    crag_action: str  # "correct" | "incorrect" | "ambiguous"
+
+
+@dataclass
+class CombinedAnswerResult:
+    """ISSUP + ISUSE 통합 결과"""
+
+    support_results: List[SupportResult]
+    usefulness_score: int
+    usefulness_confidence: float
+    should_regenerate: bool
+    regenerate_reason: str
 
 
 class SelfRAGEvaluator:
     """
-    Self-RAG 평가자
-
-    프롬프트 기반으로 Self-RAG의 reflection tokens를 구현합니다.
-    원래 Self-RAG는 모델을 fine-tuning하지만, 우리는 일반 LLM을 사용합니다.
+    Self-RAG 평가자 (배치 평가 + 조기 종료 + 단계 통합)
     """
 
     def __init__(
@@ -80,12 +94,6 @@ class SelfRAGEvaluator:
         reasoning_effort="minimal",
         temperature: float = 0.0,
     ):
-        """
-        Args:
-            model_name: 평가에 사용할 LLM 모델
-            reasoning_effort: LLM의 Thinking 수준
-            temperature: 평가 일관성을 위해 0.0 권장
-        """
         self.llm = ChatOpenAI(
             model=model_name,
             temperature=temperature,
@@ -93,312 +101,152 @@ class SelfRAGEvaluator:
             api_key=os.getenv("OPENAI_API_KEY"),
         )
 
-    def evaluate_retrieve_need(
-        self, query: str, context: Optional[str] = None
-    ) -> RetrieveResult:
-        """
-        [Retrieve]: 검색이 필요한지 판단
+    # ========== Task 1.3: 평가 단계 통합 ==========
 
-        Self-RAG의 첫 번째 단계로, LLM이 자체 지식으로 답할 수 있는지
-        아니면 외부 검색이 필요한지 판단합니다.
+    def evaluate_relevance_and_crag(
+        self,
+        query: str,
+        documents: List[str],
+        enable_early_stopping: bool = False,
+        min_relevant_docs: int = 2,
+    ) -> Tuple[List[RelevanceResult], str]:
+        """
+        ISREL + CRAG를 한 번에 평가
+
+        관련성 평가와 CRAG 액션 결정을 동시에 수행하여 중복 제거
 
         Args:
             query: 사용자 질문
-            context: 이전 대화 내용 또는 부분 생성 내용 (선택)
-
-        Returns:
-            RetrieveResult (yes/no/continue + 신뢰도 + 이유)
-            - yes: 검색 필요
-            - no: LLM 지식으로 충분
-            - continue: 현재 진행 중, 추가 검색 불필요
-        """
-        if context:
-            prompt = f"""당신은 검색 필요성 판단자입니다.
-
-    **시스템 역할**:
-    이 시스템은 대사증후군 상담사를 어시스턴트하는 전문 챗봇입니다.
-    상담사가 환자 상담 시 필요한 전문 정보와 가이드라인을 제공합니다.
-
-    **질문**: {query}
-
-    **현재 컨텍스트**:
-    {context}
-
-    **판단 기준**:
-    1. 질문이 대사증후군 상담에 필요한 전문 정보를 요구하는가?
-    - 대사증후군 관련 진단, 치료, 예방, 관리 방법
-    - 환자 상담에 필요한 생활습관 개선 (식단, 운동, 금연, 스트레스 관리 등)
-    - 위험 요인 평가 및 합병증 예방
-    → YES (내부 문서 검색 필요)
-
-    2. 질문이 단순 인사, 감사, 일상 대화인가?
-    → NO (검색 불필요)
-
-    3. 현재 컨텍스트로 충분한가?
-    → CONTINUE (추가 검색 불필요)
-
-    **중요**: 
-    대사증후군 상담 맥락에서 전문적이고 구체적인 정보가 필요한지 판단하세요.
-    일반적인 건강 상식이 아닌, 상담사가 참고할 전문 자료가 필요한지 평가하세요.
-
-    **출력 형식**:
-    반드시 다음 중 하나만 출력하세요:
-    - "yes" (내부 문서 검색 필요)
-    - "no" (검색 불필요)
-    - "continue" (현재 컨텍스트로 충분)
-
-    그 다음 줄에 간단한 이유를 한 문장으로 작성하세요.
-
-    출력:"""
-        else:
-            prompt = f"""당신은 검색 필요성 판단자입니다.
-
-    **시스템 역할**:
-    이 시스템은 대사증후군 상담사를 어시스턴트하는 전문 챗봇입니다.
-    상담사가 환자 상담 시 필요한 전문 정보와 가이드라인을 제공합니다.
-
-    **도메인 범위**:
-    대사증후군을 중심으로 진단, 치료, 식단, 운동, 금연, 스트레스 관리 등 
-    상담에 필요한 모든 영역을 포괄합니다.
-
-    **질문**: {query}
-
-    **판단 기준**:
-    1. 질문이 대사증후군 환자 상담에 필요한 전문 정보를 요구하는가?
-    - 대사증후군과 관련된 진단, 평가, 치료 정보
-    - 환자 상담 시 제공할 생활습관 개선 가이드라인
-    - 위험 요인, 합병증, 예방 전략
-    - 환자 맞춤 관리 방법
-    → YES (전문 문서 검색 필요)
-
-    2. 질문이 단순 인사나 일상 대화인가?
-    - "안녕하세요", "감사합니다", "좋은 하루 되세요" 등
-    → NO (검색 불필요)
-
-    3. 질문이 대사증후군 도메인과 무관한 일반 주제인가?
-    - 날씨, 뉴스, 일반 상식 등
-    → NO (검색 불필요)
-
-    **판단 포인트**:
-    - "상담사가 환자에게 전문적이고 근거 있는 정보를 제공하기 위해 문서 참조가 필요한가?"
-    - 일반 의학 상식과 전문 상담 가이드라인은 다릅니다.
-
-    **출력 형식**:
-    반드시 다음 중 하나만 출력하세요:
-    - "yes" (전문 문서 검색 필요)
-    - "no" (검색 불필요)
-
-    그 다음 줄에 간단한 이유를 한 문장으로 작성하세요.
-
-    출력:"""
-
-        messages = [{"role": "user", "content": prompt}]
-
-        response = self.llm.invoke(messages)
-        content = response.content.strip()
-
-        # 첫 줄: decision, 나머지: reason
-        lines = content.split("\n", 1)
-        decision_raw = lines[0].strip().lower()
-        reason = lines[1].strip() if len(lines) > 1 else "No reason provided"
-
-        # decision 정규화
-        if "yes" in decision_raw:
-            decision = "yes"
-            confidence = 1.0
-        elif "no" in decision_raw:
-            decision = "no"
-            confidence = 1.0
-        elif "continue" in decision_raw:
-            decision = "continue"
-            confidence = 0.8
-        else:
-            # 기본값: 검색 수행
-            decision = "yes"
-            confidence = 0.5
-            reason = f"불명확한 응답: {decision_raw}"
-
-        return RetrieveResult(decision=decision, confidence=confidence, reason=reason)
-
-    def evaluate_relevance(self, query: str, document: str) -> RelevanceResult:
-        """
-        ISREL: 검색된 문서가 질문과 관련 있는지 평가
-
-        Args:
-            query: 사용자 질문
-            document: 검색된 문서 내용
-
-        Returns:
-            RelevanceResult (relevant/irrelevant + 신뢰도)
-        """
-        prompt = f"""당신은 검색 품질 평가자입니다.
-
-**질문**: {query}
-
-**검색된 문서**:
-{document}
-
-**평가 기준**:
-검색된 문서가 질문에 답하는 데 유용한 정보를 포함하고 있는가?
-
-**출력 형식**:
-반드시 다음 중 하나만 출력하세요:
-- "relevant" (관련 있음)
-- "irrelevant" (관련 없음)
-
-출력:"""
-
-        response = self.llm.invoke(prompt)
-        result = response.content.strip().lower()
-
-        # 파싱
-        if "relevant" in result and "irrelevant" not in result:
-            return RelevanceResult(relevance="relevant", confidence=0.9)
-        elif "irrelevant" in result:
-            return RelevanceResult(relevance="irrelevant", confidence=0.9)
-        else:
-            # 파싱 실패 시 기본값
-            return RelevanceResult(relevance="irrelevant", confidence=0.5)
-
-    def evaluate_support(self, query: str, document: str, answer: str) -> SupportResult:
-        """
-        ISSUP: 생성된 답변이 검색 문서로 뒷받침되는지 평가
-
-        Args:
-            query: 사용자 질문
-            document: 검색된 문서 내용
-            answer: LLM이 생성한 답변
-
-        Returns:
-            SupportResult (fully_supported/partially_supported/no_support + 신뢰도)
-        """
-        prompt = f"""당신은 답변 검증 평가자입니다.
-
-**질문**: {query}
-
-**검색된 문서**:
-{document}
-
-**생성된 답변**:
-{answer}
-
-**평가 기준**:
-답변의 모든 주장이 문서로 뒷받침되는가?
-
-**출력 형식**:
-반드시 다음 중 하나만 출력하세요:
-- "fully_supported" (완전히 뒷받침됨)
-- "partially_supported" (부분적으로 뒷받침됨)
-- "no_support" (뒷받침되지 않음)
-
-출력:"""
-
-        response = self.llm.invoke(prompt)
-        result = response.content.strip().lower().replace(" ", "_")
-
-        # 파싱
-        if "fully_supported" in result or "fully supported" in result:
-            return SupportResult(support="fully_supported", confidence=0.9)
-        elif "partially_supported" in result or "partially supported" in result:
-            return SupportResult(support="partially_supported", confidence=0.9)
-        elif "no_support" in result or "no support" in result:
-            return SupportResult(support="no_support", confidence=0.9)
-        else:
-            # 파싱 실패 시 보수적 기본값
-            return SupportResult(support="partially_supported", confidence=0.5)
-
-    def evaluate_usefulness(self, query: str, answer: str) -> UsefulnessResult:
-        """
-        ISUSE: 답변이 질문에 유용한지 평가
-
-        Args:
-            query: 사용자 질문
-            answer: LLM이 생성한 답변
-
-        Returns:
-            UsefulnessResult (1-5 점수 + 신뢰도)
-        """
-        prompt = f"""당신은 답변 품질 평가자입니다.
-
-**질문**: {query}
-
-**생성된 답변**:
-{answer}
-
-**평가 기준**:
-답변이 질문에 유용하게 답변하고 있는가?
-
-**점수 기준**:
-- 5점: 매우 유용하고 완벽한 답변
-- 4점: 유용하고 대부분 답변함
-- 3점: 보통, 일부만 답변함
-- 2점: 별로 유용하지 않음
-- 1점: 전혀 유용하지 않음
-
-**출력 형식**:
-반드시 숫자 하나만 출력하세요 (1, 2, 3, 4, 또는 5):"""
-
-        response = self.llm.invoke(prompt)
-        result = response.content.strip()
-
-        # 파싱
-        try:
-            score = int(result)
-            if 1 <= score <= 5:
-                return UsefulnessResult(score=score, confidence=0.9)
-            else:
-                return UsefulnessResult(score=3, confidence=0.5)
-        except ValueError:
-            # 파싱 실패 시 중간값
-            return UsefulnessResult(score=3, confidence=0.5)
-
-    def evaluate_documents(
-        self, query: str, documents: List[str], min_relevant_docs: int = 2
-    ) -> OverallEvaluation:
-        """
-        검색된 모든 문서 평가 및 외부 검색 필요성 판단
-
-        Args:
-            query: 사용자 질문
-            documents: 검색된 문서 리스트
+            documents: 검색된 문서들
+            enable_early_stopping: 조기 종료 활성화
             min_relevant_docs: 최소 관련 문서 수
 
         Returns:
-            OverallEvaluation (문서별 평가 + 외부 검색 필요 여부)
+            (RelevanceResult 리스트, CRAG 액션)
         """
-        doc_evals = []
-        relevant_count = 0
+        if not documents:
+            return [], "incorrect"
 
-        for doc in documents:
-            relevance_result = self.evaluate_relevance(query, doc)
-            doc_eval = DocumentEvaluation(
-                document_content=doc, relevance=relevance_result
+        # 조기 종료 처리
+        if enable_early_stopping:
+            quick_check_count = min(min_relevant_docs + 1, len(documents))
+            quick_docs = documents[:quick_check_count]
+
+            quick_results, crag_action = self._evaluate_relevance_and_crag_batch(
+                query, quick_docs, min_relevant_docs
             )
-            doc_evals.append(doc_eval)
 
-            if relevance_result.relevance == "relevant":
-                relevant_count += 1
+            relevant_count = sum(1 for r in quick_results if r.relevance == "relevant")
 
-        # 외부 검색 필요성 판단
-        should_retrieve_external = relevant_count < min_relevant_docs
+            if relevant_count >= min_relevant_docs:
+                remaining = [
+                    RelevanceResult(relevance="not_evaluated", confidence=0.0)
+                    for _ in range(len(documents) - quick_check_count)
+                ]
+                return quick_results + remaining, crag_action
 
-        if should_retrieve_external:
-            reason = f"관련 문서가 {relevant_count}개로 최소 {min_relevant_docs}개 미만입니다."
-        else:
-            reason = f"관련 문서가 {relevant_count}개로 충분합니다."
-
-        return OverallEvaluation(
-            query=query,
-            document_evaluations=doc_evals,
-            should_retrieve_external=should_retrieve_external,
-            reason=reason,
+        # 전체 평가
+        return self._evaluate_relevance_and_crag_batch(
+            query, documents, min_relevant_docs
         )
 
-    def evaluate_answer_quality(
+    def _evaluate_relevance_and_crag_batch(
+        self, query: str, documents: List[str], min_relevant_docs: int
+    ) -> Tuple[List[RelevanceResult], str]:
+        """내부 헬퍼: ISREL + CRAG 통합 평가"""
+        docs_text = ""
+        for i, doc in enumerate(documents, 1):
+            doc_preview = doc[:250] + "..." if len(doc) > 250 else doc
+            docs_text += f"\n[문서 {i}]\n{doc_preview}\n"
+
+        prompt = f"""당신은 검색 품질 평가자입니다.
+
+**시스템 역할**:
+이 시스템은 대사증후군 상담사를 어시스턴트하는 전문 챗봇입니다.
+
+**질문**: {query}
+
+**검색된 문서들**:{docs_text}
+
+**평가 기준**:
+1. 각 문서가 질문에 답하는 데 유용한 정보를 포함하는지 평가
+2. 전체 검색 품질을 바탕으로 CRAG 액션 결정
+
+**CRAG 액션**:
+- "correct": 관련 문서가 {min_relevant_docs}개 이상이고 품질이 충분함
+- "ambiguous": 일부 관련 문서가 있지만 불충분함
+- "incorrect": 관련 문서가 거의 없거나 품질이 낮음
+
+**출력 형식 (JSON만 출력)**:
+{{
+  "documents": [
+    {{"doc_id": 1, "relevance": "relevant", "confidence": 0.9}},
+    {{"doc_id": 2, "relevance": "irrelevant", "confidence": 0.8}}
+  ],
+  "crag_action": "correct",
+  "reason": "관련 문서 2개로 충분함"
+}}
+
+DO NOT OUTPUT ANYTHING OTHER THAN VALID JSON.
+
+출력:"""
+
+        try:
+            response = self.llm.invoke(prompt)
+            result_text = response.content.strip()
+            result_text = result_text.replace("```json", "").replace("```", "").strip()
+
+            import json
+
+            result_json = json.loads(result_text)
+
+            # 관련성 결과 파싱
+            relevance_results = []
+            for item in result_json.get("documents", []):
+                relevance_results.append(
+                    RelevanceResult(
+                        relevance=item.get("relevance", "irrelevant"),
+                        confidence=float(item.get("confidence", 0.5)),
+                    )
+                )
+
+            # 문서 수에 맞춰 조정
+            while len(relevance_results) < len(documents):
+                relevance_results.append(
+                    RelevanceResult(relevance="irrelevant", confidence=0.5)
+                )
+
+            # CRAG 액션 추출
+            crag_action = result_json.get("crag_action", "ambiguous")
+
+            return relevance_results[: len(documents)], crag_action
+
+        except Exception as e:
+            print(f"[Warning] 통합 평가 실패, 폴백: {e}")
+            # 폴백: 개별 평가 + 수동 CRAG 판단
+            relevance_results = [
+                self.evaluate_relevance(query, doc) for doc in documents
+            ]
+            relevant_count = sum(
+                1 for r in relevance_results if r.relevance == "relevant"
+            )
+
+            if relevant_count >= min_relevant_docs:
+                crag_action = "correct"
+            elif relevant_count > 0:
+                crag_action = "ambiguous"
+            else:
+                crag_action = "incorrect"
+
+            return relevance_results, crag_action
+
+    def evaluate_answer_combined(
         self, query: str, answer: str, documents: List[str]
-    ) -> Dict[str, any]:
+    ) -> CombinedAnswerResult:
         """
-        생성된 답변의 전체 품질 평가
+        ISSUP + ISUSE를 한 번에 평가
+
+        답변의 지원도와 유용성을 동시에 평가하여 중복 제거
 
         Args:
             query: 사용자 질문
@@ -406,53 +254,492 @@ class SelfRAGEvaluator:
             documents: 참조한 문서들
 
         Returns:
-            종합 평가 결과 딕셔너리
+            CombinedAnswerResult (지원도 + 유용성 + 재생성 여부)
         """
-        # ISSUP: 각 문서에 대한 지지도 평가
-        support_results = []
-        for doc in documents:
-            support = self.evaluate_support(query, doc, answer)
-            support_results.append(support)
+        if not documents:
+            return CombinedAnswerResult(
+                support_results=[],
+                usefulness_score=1,
+                usefulness_confidence=0.5,
+                should_regenerate=True,
+                regenerate_reason="참조 문서 없음",
+            )
 
-        # ISUSE: 답변 유용성 평가
-        usefulness = self.evaluate_usefulness(query, answer)
+        docs_text = ""
+        for i, doc in enumerate(documents, 1):
+            doc_preview = doc[:250] + "..." if len(doc) > 250 else doc
+            docs_text += f"\n[문서 {i}]\n{doc_preview}\n"
 
-        # 종합 판단
-        fully_supported_count = sum(
-            1 for s in support_results if s.support == "fully_supported"
+        prompt = f"""당신은 답변 품질 평가자입니다.
+
+**질문**: {query}
+
+**생성된 답변**:
+{answer}
+
+**참조 문서들**:{docs_text}
+
+**평가 기준**:
+1. 각 문서가 답변을 얼마나 뒷받침하는지 평가 (ISSUP)
+2. 답변이 질문에 얼마나 유용한지 평가 (ISUSE)
+3. 답변 재생성이 필요한지 판단
+
+**출력 형식 (JSON만 출력)**:
+{{
+  "support": [
+    {{"doc_id": 1, "support": "fully_supported", "confidence": 0.9}},
+    {{"doc_id": 2, "support": "partially_supported", "confidence": 0.7}}
+  ],
+  "usefulness_score": 4,
+  "usefulness_confidence": 0.9,
+  "should_regenerate": false,
+  "regenerate_reason": "답변 품질 충분"
+}}
+
+**support 값**: "fully_supported", "partially_supported", "no_support"
+**usefulness_score**: 1~5 (1=매우 나쁨, 5=매우 좋음)
+
+DO NOT OUTPUT ANYTHING OTHER THAN VALID JSON.
+
+출력:"""
+
+        try:
+            response = self.llm.invoke(prompt)
+            result_text = response.content.strip()
+            result_text = result_text.replace("```json", "").replace("```", "").strip()
+
+            import json
+
+            result_json = json.loads(result_text)
+
+            # 지원도 결과 파싱
+            support_results = []
+            for item in result_json.get("support", []):
+                support_results.append(
+                    SupportResult(
+                        support=item.get("support", "no_support"),
+                        confidence=float(item.get("confidence", 0.5)),
+                    )
+                )
+
+            # 문서 수에 맞춰 조정
+            while len(support_results) < len(documents):
+                support_results.append(
+                    SupportResult(support="no_support", confidence=0.5)
+                )
+
+            return CombinedAnswerResult(
+                support_results=support_results[: len(documents)],
+                usefulness_score=int(result_json.get("usefulness_score", 3)),
+                usefulness_confidence=float(
+                    result_json.get("usefulness_confidence", 0.5)
+                ),
+                should_regenerate=bool(result_json.get("should_regenerate", False)),
+                regenerate_reason=result_json.get("regenerate_reason", ""),
+            )
+
+        except Exception as e:
+            print(f"[Warning] 통합 답변 평가 실패, 폴백: {e}")
+            # 폴백: 개별 평가
+            support_results = [
+                self.evaluate_support(query, doc, answer) for doc in documents
+            ]
+            usefulness = self.evaluate_usefulness(query, answer)
+
+            fully_supported_count = sum(
+                1 for s in support_results if s.support == "fully_supported"
+            )
+            should_regenerate = usefulness.score < 3 or fully_supported_count == 0
+
+            return CombinedAnswerResult(
+                support_results=support_results,
+                usefulness_score=usefulness.score,
+                usefulness_confidence=usefulness.confidence,
+                should_regenerate=should_regenerate,
+                regenerate_reason="품질 부족" if should_regenerate else "품질 충분",
+            )
+
+    # ========== Task 1.1 + 1.2: 기존 배치 평가 + 조기 종료 ==========
+
+    def evaluate_relevance_batch(
+        self,
+        query: str,
+        documents: List[str],
+        enable_early_stopping: bool = False,
+        min_relevant_docs: int = 2,
+    ) -> List[RelevanceResult]:
+        """ISREL: 배치 평가 + 조기 종료 (Task 1.3에서는 통합 버전 사용 권장)"""
+        if not documents:
+            return []
+
+        if enable_early_stopping:
+            quick_check_count = min(min_relevant_docs + 1, len(documents))
+            quick_docs = documents[:quick_check_count]
+
+            quick_results = self._batch_evaluate(query, quick_docs)
+
+            relevant_count = sum(1 for r in quick_results if r.relevance == "relevant")
+
+            if relevant_count >= min_relevant_docs:
+                remaining = [
+                    RelevanceResult(relevance="not_evaluated", confidence=0.0)
+                    for _ in range(len(documents) - quick_check_count)
+                ]
+                return quick_results + remaining
+
+        return self._batch_evaluate(query, documents)
+
+    def _batch_evaluate(
+        self, query: str, documents: List[str]
+    ) -> List[RelevanceResult]:
+        """내부 배치 평가 헬퍼"""
+        docs_text = ""
+        for i, doc in enumerate(documents, 1):
+            doc_preview = doc[:250] + "..." if len(doc) > 250 else doc
+            docs_text += f"\n[문서 {i}]\n{doc_preview}\n"
+
+        prompt = f"""당신은 검색 품질 평가자입니다.
+
+**질문**: {query}
+
+**검색된 문서들**:{docs_text}
+
+**출력 형식 (JSON만 출력)**:
+[
+  {{"doc_id": 1, "relevance": "relevant", "confidence": 0.9}},
+  {{"doc_id": 2, "relevance": "irrelevant", "confidence": 0.8}}
+]
+
+DO NOT OUTPUT ANYTHING OTHER THAN VALID JSON.
+
+출력:"""
+
+        try:
+            response = self.llm.invoke(prompt)
+            result_text = response.content.strip()
+            result_text = result_text.replace("```json", "").replace("```", "").strip()
+
+            import json
+
+            results_json = json.loads(result_text)
+
+            relevance_results = []
+            for item in results_json:
+                relevance_results.append(
+                    RelevanceResult(
+                        relevance=item.get("relevance", "irrelevant"),
+                        confidence=float(item.get("confidence", 0.5)),
+                    )
+                )
+
+            while len(relevance_results) < len(documents):
+                relevance_results.append(
+                    RelevanceResult(relevance="irrelevant", confidence=0.5)
+                )
+
+            return relevance_results[: len(documents)]
+
+        except Exception as e:
+            print(f"[Warning] 배치 평가 실패: {e}")
+            return [self.evaluate_relevance(query, doc) for doc in documents]
+
+    def evaluate_support_batch(
+        self, query: str, documents: List[str], answer: str
+    ) -> List[SupportResult]:
+        """ISSUP: 배치 평가 (Task 1.3에서는 통합 버전 사용 권장)"""
+        if not documents:
+            return []
+
+        docs_text = ""
+        for i, doc in enumerate(documents, 1):
+            doc_preview = doc[:250] + "..." if len(doc) > 250 else doc
+            docs_text += f"\n[문서 {i}]\n{doc_preview}\n"
+
+        prompt = f"""당신은 답변 검증 평가자입니다.
+
+**질문**: {query}
+**생성된 답변**: {answer}
+**참조 문서들**:{docs_text}
+
+**출력 형식 (JSON만 출력)**:
+[
+  {{"doc_id": 1, "support": "fully_supported", "confidence": 0.9}},
+  {{"doc_id": 2, "support": "partially_supported", "confidence": 0.7}}
+]
+
+DO NOT OUTPUT ANYTHING OTHER THAN VALID JSON.
+
+출력:"""
+
+        try:
+            response = self.llm.invoke(prompt)
+            result_text = response.content.strip()
+            result_text = result_text.replace("```json", "").replace("```", "").strip()
+
+            import json
+
+            results_json = json.loads(result_text)
+
+            support_results = []
+            for item in results_json:
+                support_results.append(
+                    SupportResult(
+                        support=item.get("support", "no_support"),
+                        confidence=float(item.get("confidence", 0.5)),
+                    )
+                )
+
+            while len(support_results) < len(documents):
+                support_results.append(
+                    SupportResult(support="no_support", confidence=0.5)
+                )
+
+            return support_results[: len(documents)]
+
+        except Exception as e:
+            print(f"[Warning] 배치 지원도 평가 실패: {e}")
+            return [self.evaluate_support(query, doc, answer) for doc in documents]
+
+    # ========== 개별 평가 메서드 (폴백용) ==========
+
+    def evaluate_retrieve_need(
+        self, query: str, context: Optional[str] = None
+    ) -> RetrieveResult:
+        """[Retrieve]: 검색이 필요한지 판단"""
+        if context:
+            prompt = f"""당신은 검색 필요성 판단자입니다.
+
+**질문**: {query}
+**현재 컨텍스트**: {context}
+
+**판단 기준**:
+1. 대사증후군 관련 전문 정보 필요 → YES
+2. 단순 인사/일상 대화 → NO
+3. 현재 컨텍스트로 충분 → CONTINUE
+
+**출력**: yes / no / continue
+그 다음 줄에 이유
+
+출력:"""
+        else:
+            prompt = f"""당신은 검색 필요성 판단자입니다.
+
+**질문**: {query}
+
+**판단 기준**:
+1. 대사증후군 관련 전문 정보 필요 → YES
+2. 단순 인사/일상 대화 → NO
+
+**출력**: yes / no
+그 다음 줄에 이유
+
+출력:"""
+
+        response = self.llm.invoke(prompt)
+        result = response.content.strip().lower()
+
+        lines = result.split("\n", 1)
+        decision = lines[0].strip()
+        reason = lines[1].strip() if len(lines) > 1 else "판단 완료"
+
+        if "yes" in decision:
+            return RetrieveResult(decision="yes", confidence=0.9, reason=reason)
+        elif "no" in decision:
+            return RetrieveResult(decision="no", confidence=0.9, reason=reason)
+        elif "continue" in decision:
+            return RetrieveResult(decision="continue", confidence=0.9, reason=reason)
+        else:
+            return RetrieveResult(decision="yes", confidence=0.5, reason="판단 불명확")
+
+    def evaluate_relevance(self, query: str, document: str) -> RelevanceResult:
+        """ISREL: 개별 평가"""
+        prompt = f"""**질문**: {query}
+**문서**: {document}
+
+출력: relevant / irrelevant"""
+
+        response = self.llm.invoke(prompt)
+        result = response.content.strip().lower()
+
+        if "relevant" in result and "irrelevant" not in result:
+            return RelevanceResult(relevance="relevant", confidence=0.9)
+        elif "irrelevant" in result:
+            return RelevanceResult(relevance="irrelevant", confidence=0.9)
+        else:
+            return RelevanceResult(relevance="irrelevant", confidence=0.5)
+
+    def evaluate_support(self, query: str, document: str, answer: str) -> SupportResult:
+        """ISSUP: 개별 평가"""
+        prompt = f"""**질문**: {query}
+**문서**: {document}
+**답변**: {answer}
+
+출력: fully_supported / partially_supported / no_support"""
+
+        response = self.llm.invoke(prompt)
+        result = response.content.strip().lower().replace(" ", "_")
+
+        if "fully_supported" in result:
+            return SupportResult(support="fully_supported", confidence=0.9)
+        elif "partially_supported" in result:
+            return SupportResult(support="partially_supported", confidence=0.9)
+        else:
+            return SupportResult(support="no_support", confidence=0.9)
+
+    def evaluate_usefulness(self, query: str, answer: str) -> UsefulnessResult:
+        """ISUSE: 개별 평가"""
+        prompt = f"""**질문**: {query}
+**답변**: {answer}
+
+출력: 1~5 점수"""
+
+        response = self.llm.invoke(prompt)
+        result = response.content.strip()
+
+        try:
+            score = int(result)
+            if 1 <= score <= 5:
+                return UsefulnessResult(score=score, confidence=0.9)
+            else:
+                return UsefulnessResult(score=3, confidence=0.5)
+        except ValueError:
+            return UsefulnessResult(score=3, confidence=0.5)
+
+    # ========== 통합 평가 메서드 (Task 1.3 적용) ==========
+
+    def evaluate_documents(
+        self,
+        query: str,
+        documents: List[str],
+        min_relevant_docs: int = 2,
+        enable_early_stopping: bool = False,
+        use_integrated: bool = True,  # 통합 평가 사용
+    ) -> OverallEvaluation:
+        """
+        검색된 문서 평가 + CRAG 액션 결정
+
+        ISREL+CRAG 통합 평가 (use_integrated=True)
+        """
+        if not documents:
+            return OverallEvaluation(
+                query=query,
+                document_evaluations=[],
+                should_retrieve_external=True,
+                reason="검색 결과 없음",
+                early_stopped=False,
+                crag_action="incorrect",
+            )
+
+        if use_integrated:
+            # 통합 평가
+            relevance_results, crag_action = self.evaluate_relevance_and_crag(
+                query, documents, enable_early_stopping, min_relevant_docs
+            )
+        else:
+            # 기존 방식 (Task 1.1 + 1.2)
+            relevance_results = self.evaluate_relevance_batch(
+                query, documents, enable_early_stopping, min_relevant_docs
+            )
+            relevant_count = sum(
+                1 for r in relevance_results if r.relevance == "relevant"
+            )
+            if relevant_count >= min_relevant_docs:
+                crag_action = "correct"
+            elif relevant_count > 0:
+                crag_action = "ambiguous"
+            else:
+                crag_action = "incorrect"
+
+        # DocumentEvaluation 리스트 생성
+        doc_evals = []
+        for doc, rel_result in zip(documents, relevance_results):
+            doc_evals.append(
+                DocumentEvaluation(document_content=doc, relevance=rel_result)
+            )
+
+        # 관련 문서 카운트
+        relevant_count = sum(
+            1 for doc_eval in doc_evals if doc_eval.relevance.relevance == "relevant"
         )
 
-        return {
-            "support_results": support_results,
-            "usefulness": usefulness,
-            "fully_supported_count": fully_supported_count,
-            "should_regenerate": (usefulness.score < 3 or fully_supported_count == 0),
-        }
+        early_stopped = any(
+            doc_eval.relevance.relevance == "not_evaluated" for doc_eval in doc_evals
+        )
+
+        # 외부 검색 필요 여부
+        should_retrieve_external = crag_action in ["incorrect", "ambiguous"]
+
+        if crag_action == "correct":
+            reason = f"관련 문서 {relevant_count}개로 충분함"
+        elif crag_action == "ambiguous":
+            reason = f"관련 문서 {relevant_count}개, 외부 검색으로 보완 필요"
+        else:
+            reason = f"관련 문서 부족, 외부 검색 필요"
+
+        if early_stopped:
+            reason += " (조기 종료)"
+
+        return OverallEvaluation(
+            query=query,
+            document_evaluations=doc_evals,
+            should_retrieve_external=should_retrieve_external,
+            reason=reason,
+            early_stopped=early_stopped,
+            crag_action=crag_action,
+        )
+
+    def evaluate_answer_quality(
+        self,
+        query: str,
+        answer: str,
+        documents: List[str],
+        use_integrated: bool = True,  # 통합 평가 사용
+    ) -> Dict[str, any]:
+        """
+        답변 품질 평가
+
+        ISSUP+ISUSE 통합 평가 (use_integrated=True)
+        """
+        if use_integrated:
+            # 통합 평가
+            combined_result = self.evaluate_answer_combined(query, answer, documents)
+
+            return {
+                "support_results": combined_result.support_results,
+                "usefulness": UsefulnessResult(
+                    score=combined_result.usefulness_score,
+                    confidence=combined_result.usefulness_confidence,
+                ),
+                "fully_supported_count": sum(
+                    1
+                    for s in combined_result.support_results
+                    if s.support == "fully_supported"
+                ),
+                "should_regenerate": combined_result.should_regenerate,
+                "regenerate_reason": combined_result.regenerate_reason,
+            }
+        else:
+            support_results = self.evaluate_support_batch(query, documents, answer)
+            usefulness = self.evaluate_usefulness(query, answer)
+
+            fully_supported_count = sum(
+                1 for s in support_results if s.support == "fully_supported"
+            )
+
+            return {
+                "support_results": support_results,
+                "usefulness": usefulness,
+                "fully_supported_count": fully_supported_count,
+                "should_regenerate": (
+                    usefulness.score < 3 or fully_supported_count == 0
+                ),
+            }
 
 
-# 편의 함수
 def create_evaluator(
     model_name: str = "gpt-5-mini", reasoning_effort="minimal", temperature: float = 0.0
 ) -> SelfRAGEvaluator:
-    """
-    Self-RAG 평가자 생성
-
-    Example:
-        >>> evaluator = create_evaluator()
-
-        >>> # [Retrieve]: 검색 필요성 판단
-        >>> retrieve_result = evaluator.evaluate_retrieve_need(
-        ...     "대사증후군의 최신 치료법은?"
-        ... )
-        >>> print(retrieve_result.decision)  # "yes" | "no" | "continue"
-
-        >>> # ISREL: 문서 관련성 평가
-        >>> relevance = evaluator.evaluate_relevance(
-        ...     "대사증후군이란?",
-        ...     "대사증후군은 복부 비만, 고혈압 등이 동반되는 질환입니다."
-        ... )
-        >>> print(relevance.relevance)  # "relevant" | "irrelevant"
-    """
+    """Self-RAG 평가자 생성"""
     return SelfRAGEvaluator(
         model_name=model_name,
         reasoning_effort=reasoning_effort,
