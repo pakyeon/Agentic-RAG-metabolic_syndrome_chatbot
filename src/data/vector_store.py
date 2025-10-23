@@ -1,168 +1,133 @@
-# vector_store.py
 """
-ChromaDB VectorStore 구축 + Hybrid Search 통합
+VectorDB 구축 및 하이브리드 검색
 
-Task 1.1 (OpenAI 임베딩) + Task 1.2 (문서 로드/청킹) + Hybrid Search
+- BM25:Vector 가중치 1:1 → 2:3 (0.5:0.5 → 0.4:0.6)
+- 총 검색 문서 수 명확히 5개로 제한
 """
 
 import os
-import shutil
 from pathlib import Path
 from typing import List, Optional
 
 from langchain_chroma import Chroma
-from langchain_core.documents import Document
 from langchain_community.retrievers import BM25Retriever
 from langchain_classic.retrievers import EnsembleRetriever
-from tqdm import tqdm
+from langchain_core.documents import Document
 
+from src.data.embeddings import OpenAIEmbeddings
+from src.data.document_loader import MetabolicSyndromeDocumentLoader
+from src.data.document_loader import MetabolicSyndromeChunker
+from src.data.path_utils import project_path
 
-from .embeddings import OpenAIEmbeddings
-from .document_loader import (
-    MetabolicSyndromeDocumentLoader,
-    MetabolicSyndromeChunker,
-)
-from .path_utils import (
-    DEFAULT_PARSED_DIRECTORY,
-    DEFAULT_PERSIST_DIRECTORY,
-    DEFAULT_RAW_DIRECTORY,
-    project_path,
-)
+# 기본 경로 설정
+DEFAULT_RAW_DIRECTORY = project_path("data/raw")
+DEFAULT_PARSED_DIRECTORY = project_path("data/parsed")
+DEFAULT_PERSIST_DIRECTORY = project_path("data/chroma_db")
 
 
 class VectorStoreBuilder:
-    """VectorDB 빌더 + Hybrid Search 통합"""
+    """ChromaDB VectorStore 구축 및 로드"""
 
     def __init__(
         self,
-        embedding_model: str = "text-embedding-3-small",
         persist_directory: str | Path = DEFAULT_PERSIST_DIRECTORY,
-        collection_name: str = "metabolic_syndrome",
+        collection_name: str = "metabolic_syndrome_docs",
+        embedding_model: str = "text-embedding-3-small",
     ):
         """
         Args:
-            embedding_model: OpenAI 임베딩 모델
             persist_directory: ChromaDB 저장 경로
-            collection_name: 컬렉션 이름
+            collection_name: ChromaDB 컬렉션 이름
+            embedding_model: 임베딩 모델 이름
         """
-        self.embedding_model = embedding_model
-        persist_path = project_path(persist_directory)
-        if persist_path is None:
-            raise ValueError("persist_directory cannot be None")
-        self.persist_directory = persist_path
+        self.persist_directory = Path(persist_directory)
         self.collection_name = collection_name
-        self._chunks = None  # Hybrid Search용 문서 저장
-
-        # OpenAI 임베딩 초기화 (Task 1.1)
+        self.embedding_model = embedding_model
         self.embeddings = OpenAIEmbeddings(model=embedding_model)
 
-        print(f"[VectorStore Builder] 초기화 완료")
-        print(f"  - 임베딩 모델: {embedding_model}")
-        print(f"  - 저장 경로: {self.persist_directory}")
-        print(f"  - 컬렉션: {collection_name}")
+        # 빌드 시 청크 캐시 (HybridRetriever 생성용)
+        self._chunks: Optional[List[Document]] = None
 
     def build(
         self,
-        parsed_dir: str | Path,
-        raw_dir: Optional[str | Path] = None,
+        parsed_dir: str,
+        raw_dir: Optional[str] = None,
         chunk_size: int = 500,
         chunk_overlap: int = 50,
-        batch_size: int = 100,
+        batch_size: int = 50,
         force_rebuild: bool = False,
     ) -> Chroma:
-        """VectorDB 구축
+        """VectorDB 구축 또는 재구축
 
         Args:
             parsed_dir: 파싱된 MD 디렉토리
-            raw_dir: 원본 PDF 디렉토리
+            raw_dir: 원본 PDF 디렉토리 (선택)
             chunk_size: 청크 크기
             chunk_overlap: 청크 오버랩
-            batch_size: 배치 크기 (한번에 추가할 문서 수)
-            force_rebuild: 기존 DB 삭제 후 재구축
+            batch_size: 배치 크기
+            force_rebuild: 기존 DB 삭제 후 재구축 여부
 
         Returns:
             Chroma 인스턴스
         """
-        # 기존 DB 처리
-        if self.persist_directory.exists():
-            if force_rebuild:
-                print(f"\n[Info] 기존 DB 삭제 중: {self.persist_directory}")
-                shutil.rmtree(self.persist_directory)
-            else:
-                print(f"\n[Warning] 기존 DB가 존재합니다: {self.persist_directory}")
-                print("기존 DB를 사용하려면 load() 메서드를 사용하세요.")
-                print("재구축하려면 force_rebuild=True로 설정하세요.")
-                return self.load()
-
-        print(f"\n{'='*60}")
-        print(f"VectorDB 구축 시작")
-        print(f"{'='*60}\n")
-
-        # Step 1: 문서 로드 (Task 1.2)
-        print("Step 1/4: 문서 로드")
         parsed_path = project_path(parsed_dir)
         raw_path = project_path(raw_dir) if raw_dir else None
 
         if parsed_path is None:
-            raise ValueError("parsed_dir is required")
+            raise ValueError(
+                f"parsed_dir을 찾을 수 없습니다: {parsed_dir}\n"
+                "프로젝트 루트 기준 상대 경로를 입력하세요."
+            )
+
+        # 1. force_rebuild 시 기존 DB 삭제
+        if force_rebuild and self.persist_directory.exists():
+            print(f"[VectorStore] 기존 DB 삭제: {self.persist_directory}")
+            import shutil
+
+            shutil.rmtree(self.persist_directory)
+
+        # 2. 문서 로드
+        print(f"\n{'='*60}")
+        print(f"[VectorStore] 문서 로드 중...")
+        print(f"  - Parsed Dir: {parsed_path}")
+        if raw_path:
+            print(f"  - Raw Dir: {raw_path}")
+        print(f"{'='*60}\n")
 
         loader = MetabolicSyndromeDocumentLoader(
             parsed_dir=parsed_path, raw_dir=raw_path
         )
-        documents = loader.load_documents()
+        docs = loader.load_documents()
 
-        if not documents:
-            raise ValueError("로드된 문서가 없습니다. 경로를 확인하세요.")
-
-        # Step 2: 청킹 (Task 1.2)
-        print("Step 2/4: 문서 청킹")
-        chunker = MetabolicSyndromeChunker(
-            chunk_size=chunk_size, chunk_overlap=chunk_overlap
+        # 3. 청킹
+        print(
+            f"\n[VectorStore] 청킹 중 (size={chunk_size}, overlap={chunk_overlap})..."
         )
-        chunks = chunker.chunk_documents(documents, show_progress=True)
+        chunker = MetabolicSyndromeChunker()
+        chunks = chunker.chunk_documents(docs, show_progress=True)
 
-        if not chunks:
-            raise ValueError("생성된 청크가 없습니다.")
-
-        # Hybrid Search용 청크 저장
+        # 청크 캐시 (HybridRetriever용)
         self._chunks = chunks
 
-        # Step 3: ChromaDB 초기화 및 임베딩
-        print("Step 3/4: ChromaDB 초기화 및 임베딩")
-        print(f"  - 총 {len(chunks)}개 청크를 임베딩합니다...")
-        print(f"  - 배치 크기: {batch_size}")
+        print(f"\n[VectorStore] 총 {len(chunks)}개 청크 생성 완료\n")
 
-        # persist_directory 생성
-        self.persist_directory.mkdir(parents=True, exist_ok=True)
+        # 4. 임베딩 및 저장
+        print(f"[VectorStore] ChromaDB 구축 중 (batch_size={batch_size})...")
+        print(f"  - Persist Dir: {self.persist_directory}")
+        print(f"  - Collection: {self.collection_name}")
+        print(f"  - Embedding: {self.embedding_model}\n")
 
-        # LangChain embeddings 객체 가져오기
         lc_embeddings = self.embeddings.get_langchain_embeddings()
 
-        # ChromaDB 초기화 (빈 상태)
-        vectorstore = Chroma(
+        vectorstore = Chroma.from_documents(
+            documents=chunks,
+            embedding=lc_embeddings,
             collection_name=self.collection_name,
-            embedding_function=lc_embeddings,
             persist_directory=str(self.persist_directory),
         )
 
-        # Step 4: 배치로 문서 추가
-        print("Step 4/4: 배치 인덱싱")
-
-        total_batches = (len(chunks) + batch_size - 1) // batch_size
-
-        with tqdm(total=len(chunks), desc="인덱싱 진행", unit="chunk") as pbar:
-            for i in range(0, len(chunks), batch_size):
-                batch = chunks[i : i + batch_size]
-                batch_num = i // batch_size + 1
-
-                # 배치 추가
-                vectorstore.add_documents(documents=batch)
-
-                pbar.update(len(batch))
-                pbar.set_postfix({"배치": f"{batch_num}/{total_batches}"})
-
         print(f"\n{'='*60}")
-        print(f"VectorDB 구축 완료!")
+        print("[VectorStore] 구축 완료!")
         print(f"{'='*60}\n")
 
         # 정보 출력
@@ -205,20 +170,22 @@ class VectorStoreBuilder:
         documents: Optional[List[Document]] = None,
         parsed_dir: Optional[str | Path] = None,
         raw_dir: Optional[str | Path] = None,
-        bm25_weight: float = 0.5,
-        vector_weight: float = 0.5,
-        k: int = 5,
+        bm25_weight: float = 0.4,  # ⭐ 변경: 0.5 → 0.4 (2:3 비율)
+        vector_weight: float = 0.6,  # ⭐ 변경: 0.5 → 0.6
+        k: int = 5,  # ⭐ 총 5개 문서만 검색
     ) -> "HybridRetriever":
         """Hybrid Retriever 생성
+
+        BM25:Vector = 2:3 (0.4:0.6), 총 5개 문서
 
         Args:
             vectorstore: Chroma 인스턴스 (None이면 자동 로드)
             documents: 문서 리스트 (None이면 자동 로드)
             parsed_dir: 문서 로드 시 필요 (documents가 None일 때)
             raw_dir: 문서 로드 시 필요 (선택)
-            bm25_weight: BM25 가중치
-            vector_weight: Vector 가중치
-            k: 기본 반환 문서 수
+            bm25_weight: BM25 가중치 (기본값 0.4)
+            vector_weight: Vector 가중치 (기본값 0.6)
+            k: 기본 반환 문서 수 (기본값 5)
 
         Returns:
             HybridRetriever 인스턴스
@@ -307,23 +274,26 @@ class VectorStoreBuilder:
 
 
 class HybridRetriever:
-    """LangChain EnsembleRetriever를 사용한 하이브리드 검색"""
+    """LangChain EnsembleRetriever를 사용한 하이브리드 검색
+
+    BM25:Vector = 2:3 (0.4:0.6), 총 5개 문서
+    """
 
     def __init__(
         self,
         vectorstore: Chroma,
         documents: List[Document],
-        bm25_weight: float = 0.5,
-        vector_weight: float = 0.5,
-        k: int = 5,
+        bm25_weight: float = 0.4,  # ⭐ 기본값 변경: 0.5 → 0.4
+        vector_weight: float = 0.6,  # ⭐ 기본값 변경: 0.5 → 0.6
+        k: int = 5,  # ⭐ 기본값 5개 유지
     ):
         """
         Args:
             vectorstore: ChromaDB 벡터 스토어
             documents: 전체 문서 리스트 (BM25용)
-            bm25_weight: BM25 가중치 (0~1)
-            vector_weight: Vector 가중치 (0~1)
-            k: 기본 반환 문서 수
+            bm25_weight: BM25 가중치 (기본값 0.4)
+            vector_weight: Vector 가중치 (기본값 0.6)
+            k: 기본 반환 문서 수 (기본값 5)
         """
         self.vectorstore = vectorstore
         self.documents = documents
@@ -347,27 +317,35 @@ class HybridRetriever:
         )
 
         print(f"[Hybrid Retriever] 초기화 완료")
-        print(f"  - BM25 가중치: {bm25_weight}")
-        print(f"  - Vector 가중치: {vector_weight}")
+        print(f"  - BM25 가중치: {bm25_weight} (2)")
+        print(f"  - Vector 가중치: {vector_weight} (3)")
+        print(f"  - 비율: BM25:Vector = 2:3")
         print(f"  - 인덱싱된 문서: {len(documents)}개")
-        print(f"  - 기본 k: {k}\n")
+        print(f"  - 기본 k: {k}개\n")
 
     def search(self, query: str, k: int = None) -> List[Document]:
         """하이브리드 검색
 
+        총 5개 문서만 반환
+
         Args:
             query: 검색 쿼리
-            k: 반환할 문서 수 (None이면 기본값 사용)
+            k: 반환할 문서 수 (None이면 기본값 5 사용)
 
         Returns:
-            Document 리스트
+            Document 리스트 (최대 k개)
         """
+        _k = k or self.k
+
         if k and k != self.k:
             # k 값이 다르면 임시로 업데이트
             self.bm25_retriever.k = k
             self.vector_retriever.search_kwargs["k"] = k
 
         results = self.ensemble_retriever.invoke(query)
+
+        # ⭐ 명확히 k개로 제한
+        results = results[:_k]
 
         # k 값 복원
         if k and k != self.k:
@@ -381,12 +359,14 @@ class HybridRetriever:
     ) -> List[tuple[Document, float]]:
         """하이브리드 검색 (점수 포함)
 
+        총 5개 문서만 반환
+
         Args:
             query: 검색 쿼리
-            k: 반환할 문서 수
+            k: 반환할 문서 수 (None이면 기본값 5 사용)
 
         Returns:
-            [(Document, score), ...]
+            [(Document, score), ...] (최대 k개)
         """
         _k = k or self.k
 
@@ -408,7 +388,8 @@ class HybridRetriever:
                     break
             results.append((doc, score))
 
-        return results
+        # ⭐ 명확히 k개로 제한
+        return results[:_k]
 
     def get_retriever(self) -> EnsembleRetriever:
         """LangChain Retriever 객체 반환 (LangGraph 통합용)
@@ -470,19 +451,21 @@ def create_hybrid_retriever(
     persist_directory: str | Path = DEFAULT_PERSIST_DIRECTORY,
     parsed_dir: Optional[str | Path] = None,
     raw_dir: Optional[str | Path] = None,
-    bm25_weight: float = 0.5,
-    vector_weight: float = 0.5,
-    k: int = 5,
+    bm25_weight: float = 0.4,  # ⭐ 기본값 변경: 0.5 → 0.4 (2:3 비율)
+    vector_weight: float = 0.6,  # ⭐ 기본값 변경: 0.5 → 0.6
+    k: int = 5,  # ⭐ 총 5개 문서만 검색
 ) -> HybridRetriever:
     """Hybrid Retriever 생성 헬퍼 함수
+
+    BM25:Vector = 2:3 (0.4:0.6), 총 5개 문서
 
     Args:
         persist_directory: ChromaDB 저장 경로
         parsed_dir: 문서 디렉토리 (필요시)
         raw_dir: 원본 PDF 디렉토리 (선택)
-        bm25_weight: BM25 가중치
-        vector_weight: Vector 가중치
-        k: 기본 반환 문서 수
+        bm25_weight: BM25 가중치 (기본값 0.4)
+        vector_weight: Vector 가중치 (기본값 0.6)
+        k: 기본 반환 문서 수 (기본값 5)
 
     Returns:
         HybridRetriever 인스턴스
@@ -546,10 +529,10 @@ def test_vector_search(vectorstore: Chroma):
 
 def test_hybrid_search(builder: VectorStoreBuilder):
     """Hybrid 검색 테스트"""
-    print("\n=== Hybrid Search 테스트 ===\n")
+    print("\n=== Hybrid Search 테스트 (BM25:Vector = 2:3) ===\n")
 
-    # Hybrid Retriever 생성 (빌드 시 저장된 청크 사용)
-    hybrid = builder.create_hybrid_retriever(bm25_weight=0.5, vector_weight=0.5, k=5)
+    # Hybrid Retriever 생성 (Task 1.1 개선 설정 적용)
+    hybrid = builder.create_hybrid_retriever(bm25_weight=0.4, vector_weight=0.6, k=5)
 
     queries = [
         "대사증후군 진단 기준은?",
@@ -560,8 +543,9 @@ def test_hybrid_search(builder: VectorStoreBuilder):
     for query in queries:
         print(f"쿼리: '{query}'")
 
-        results = hybrid.search_with_scores(query, k=3)
+        results = hybrid.search_with_scores(query, k=5)
 
+        print(f"  검색 결과: {len(results)}개 문서")
         for i, (doc, score) in enumerate(results, 1):
             print(f"  [{i}] Score: {score:.4f}")
             print(f"      출처: {doc.metadata.get('basename', 'N/A')[:40]}")
@@ -577,19 +561,18 @@ def test_load_and_hybrid():
     persist_dir = DEFAULT_PERSIST_DIRECTORY
     parsed_dir = DEFAULT_PARSED_DIRECTORY
 
-    # 헬퍼 함수로 Hybrid 생성
+    # 헬퍼 함수로 Hybrid 생성 (Task 1.1 개선 기본값 적용)
     hybrid = create_hybrid_retriever(
         persist_directory=persist_dir,
         parsed_dir=parsed_dir,  # 문서 재로드
-        bm25_weight=0.5,
-        vector_weight=0.5,
     )
 
     query = "고혈압 수치"
     print(f"쿼리: '{query}'\n")
 
-    results = hybrid.search(query, k=3)
+    results = hybrid.search(query, k=5)
 
+    print(f"검색 결과: {len(results)}개 문서")
     for i, doc in enumerate(results, 1):
         print(f"[{i}] {doc.metadata.get('basename', 'N/A')[:40]}")
         print(f"    {doc.page_content[:80]}...\n")
@@ -621,7 +604,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--vector":
         test_vector_search(vectorstore)
 
-    # Hybrid 검색 테스트
+    # Hybrid 검색 테스트 (Task 1.1 개선 확인)
     if len(sys.argv) > 1 and sys.argv[1] == "--hybrid":
         test_hybrid_search(builder)
 
