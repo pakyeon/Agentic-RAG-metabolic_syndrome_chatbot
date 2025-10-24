@@ -58,6 +58,12 @@ LangGraph 기반 Agentic RAG 시스템으로, Self-RAG의 Reflection Tokens와 C
   - 대사증후군 관련 의료 문서 임베딩
   - Hybrid Retrieval (Semantic + BM25)
 
+### 4. **Graphiti MCP 기반 장·단기 기억**
+- **langchain-mcp-adapter**로 Graphiti MCP 서버를 LangGraph Agent에 연결
+- **단기 기억**: 세션 내 최근 QA를 메모리 버퍼에 보관하여 즉각적인 회상 지원
+- **장기 기억**: Graphiti MCP에 상담 로그를 영속화하고 세션별로 검색
+- **유연한 설정**: `GRAPHITI_MCP_*` 환경 변수를 통해 stdio/HTTP 등 다양한 트랜스포트를 구성
+
 ---
 
 ## 🔄 시스템 워크플로우
@@ -127,6 +133,43 @@ result = evaluator.evaluate_retrieve_need(
 print(result.decision)  # "yes" or "no"
 print(result.reason)    # 판단 근거
 ```
+
+---
+
+## 🧠 Graphiti MCP 메모리 사용법
+
+메모리 매니저는 `src/memory/graphiti.py`에 구현되어 있으며, 기본적으로 안전하게 비활성화된 상태로 동작합니다. Graphiti MCP 서버 정보를 제공하면 LangGraph 에이전트가 장·단기 기억을 통합적으로 활용합니다.
+
+### 1. 필수 환경 변수
+
+```
+GRAPHITI_MCP_TRANSPORT=stdio            # 또는 streamable_http / sse / websocket
+GRAPHITI_MCP_COMMAND=graphiti-mcp       # stdio 사용 시 서버 실행 커맨드
+GRAPHITI_MCP_ARGS="serve --workspace /path/to/workspace"
+# 또는 HTTP 기반 사용 시
+# GRAPHITI_MCP_URL=https://graphiti.example.com/mcp
+```
+
+필요 시 아래 옵션도 사용할 수 있습니다.
+
+```
+GRAPHITI_MCP_HEADERS='{"Authorization": "Bearer ..."}'
+GRAPHITI_MCP_ENV='{"GRAPHITI_API_KEY": "..."}'
+GRAPHITI_MEMORY_NAMESPACE=metabolic-syndrome
+GRAPHITI_MEMORY_SEARCH_LIMIT=5
+GRAPHITI_SHORT_TERM_WINDOW=5
+GRAPHITI_MCP_SEARCH_TOOL=graphiti.search_memories
+GRAPHITI_MCP_UPSERT_TOOL=graphiti.upsert_memory
+GRAPHITI_MEMORY_TAGS='["agentic-rag"]'
+```
+
+### 2. 메모리 흐름
+
+1. `load_memory_context_node`가 그래프 초기에 호출되어 Graphiti에서 장기 기억을 검색하고, 최근 단기 버퍼와 함께 상태에 주입합니다.
+2. `generate_answer_node`는 단기/장기 기억을 프롬프트에 포함하여 환자 맞춤 답변을 강화합니다.
+3. `evaluate_answer_node`는 답변 평가 후 `GraphitiMemoryManager`를 통해 상담 로그를 영속화하고 단기 버퍼를 갱신합니다.
+
+Graphiti 구성 없이 실행하면 메모리 매니저는 자동으로 안전 모드로 동작하며, 단기 버퍼만 사용합니다.
 
 **판단 기준:**
 - 구체적인 사실 정보 필요 → `yes`

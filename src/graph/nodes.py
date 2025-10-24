@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """Agentic RAG 그래프 노드 함수들"""
 
-from typing import Dict
+from typing import Dict, List
 from src.graph.state import RAGState
+
+from src.memory import get_memory_manager
 
 
 # === 환자 컨텍스트 로드 ===
@@ -31,6 +33,35 @@ def load_patient_context_node(state: RAGState) -> Dict:
 
     except Exception as e:
         return {"patient_context": "", "error": f"환자 정보 로드 실패: {str(e)}"}
+
+
+def load_memory_context_node(state: RAGState) -> Dict:
+    """Graphiti MCP를 활용하여 단/장기 기억 컨텍스트를 불러옵니다."""
+    manager = get_memory_manager()
+
+    # 환자 컨텍스트가 이미 존재하면 검색 쿼리에 병합
+    query_parts: List[str] = []
+    if state.get("patient_context"):
+        query_parts.append(str(state["patient_context"]))
+    query_parts.append(state["question"])
+    query = "\n\n".join(part for part in query_parts if part)
+
+    snapshot = manager.fetch_context(
+        query=query,
+        session_id=state.get("memory_session_id"),
+    )
+
+    metadata = dict(state.get("metadata", {}))
+    metadata["memory_short_term_used"] = len(snapshot.short_term)
+    metadata["memory_long_term_used"] = len(snapshot.long_term)
+    if snapshot.error:
+        metadata["memory_error"] = snapshot.error
+
+    return {
+        "short_term_memory": snapshot.short_term,
+        "long_term_memory": snapshot.long_term,
+        "metadata": metadata,
+    }
 
 
 # === Self-RAG [Retrieve] 토큰: 검색 필요성 판단 ===
@@ -359,6 +390,19 @@ def generate_answer_node(state: RAGState) -> Dict:
         question = state["question"]
         merged_context = state.get("merged_context", "")
         patient_context = state.get("patient_context", "")
+        short_term_memory = state.get("short_term_memory", [])
+        long_term_memory = state.get("long_term_memory", [])
+
+        memory_sections: List[str] = []
+        if short_term_memory:
+            memory_sections.append(
+                "**단기 기억:**\n" + "\n\n".join(short_term_memory)
+            )
+        if long_term_memory:
+            memory_sections.append(
+                "**장기 기억:**\n" + "\n\n".join(long_term_memory)
+            )
+        memory_block = "\n\n".join(memory_sections)
 
         # LLM 초기화
         llm = ChatOpenAI(
@@ -389,28 +433,22 @@ def generate_answer_node(state: RAGState) -> Dict:
 - 논리적이고 이해하기 쉬운 구조
 - 실용적이고 실천 가능한 조언"""
 
-            # 환자 정보 포함 여부에 따라 user_prompt 구성
+            context_segments: List[str] = []
             if patient_context:
-                user_prompt = f"""**환자 정보:**
-{patient_context}
+                context_segments.append(f"**환자 정보:**\n{patient_context}")
+            if memory_block:
+                context_segments.append(memory_block)
+            context_segments.append(f"**참고 자료:**\n{merged_context}")
 
-**참고 자료:**
-{merged_context}
+            context_payload = "\n\n".join(context_segments)
+
+            user_prompt = f"""{context_payload}
 
 **상담사의 질문:**
 {question}
 
-위 환자 정보와 참고 자료를 바탕으로, 상담사가 환자에게 제공할 수 있는
+위 환자 정보, 기억, 참고 자료를 바탕으로 상담사가 환자에게 제공할 수 있는
 전문적이고 맞춤형 답변을 작성하세요."""
-            else:
-                user_prompt = f"""**참고 자료:**
-{merged_context}
-
-**상담사의 질문:**
-{question}
-
-위 참고 자료를 바탕으로, 상담사가 환자 상담 시 활용할 수 있는
-전문적인 답변을 작성하세요."""
 
         # Case 2: 검색을 스킵한 경우 (merged_context 없음) - Self-RAG [Retrieve] = no
         else:
@@ -426,19 +464,20 @@ def generate_answer_node(state: RAGState) -> Dict:
 2. 일반적인 의료 상식 제공
 3. 구체적인 전문 정보가 필요한 경우 문서 검색 권장"""
 
+            context_segments: List[str] = []
             if patient_context:
-                user_prompt = f"""**환자 정보:**
-{patient_context}
+                context_segments.append(f"**환자 정보:**\n{patient_context}")
+            if memory_block:
+                context_segments.append(memory_block)
 
-**상담사의 질문:**
+            context_payload = "\n\n".join(context_segments)
+            if context_payload:
+                context_payload = f"{context_payload}\n\n"
+
+            user_prompt = f"""{context_payload}**상담사의 질문:**
 {question}
 
-일반적인 의료 지식을 바탕으로 간단히 답변하세요."""
-            else:
-                user_prompt = f"""**상담사의 질문:**
-{question}
-
-일반적인 의료 지식을 바탕으로 간단히 답변하세요."""
+일반적인 의료 지식과 최근 기억을 바탕으로 간단히 답변하세요."""
 
         # LLM 호출
         messages = [
@@ -475,6 +514,7 @@ def evaluate_answer_node(state: RAGState) -> Dict:
         merged_context = state.get("merged_context", "")
         iteration = state.get("iteration", 1)
         max_iterations = state.get("max_iterations", 2)
+        manager = get_memory_manager()
 
         # 답변이 없으면 재생성 필요
         if not answer or not merged_context:
@@ -482,6 +522,7 @@ def evaluate_answer_node(state: RAGState) -> Dict:
                 "support_score": 0.0,
                 "usefulness_score": 0.0,
                 "needs_regeneration": True,
+                "short_term_memory": state.get("short_term_memory", []),
             }
 
         # Self-RAG 평가자 생성
@@ -544,10 +585,25 @@ def evaluate_answer_node(state: RAGState) -> Dict:
         ) and iteration < max_iterations:
             needs_regeneration = True
 
+        manager.store_interaction(
+            question=question,
+            answer=answer,
+            metadata={
+                "support_score": support_score,
+                "usefulness_score": usefulness_score,
+                "iteration": iteration,
+                "patient_id": state.get("patient_id"),
+            },
+            session_id=state.get("memory_session_id"),
+        )
+
+        updated_short_term = manager.get_short_term()
+
         return {
             "support_score": support_score,
             "usefulness_score": usefulness_score,
             "needs_regeneration": needs_regeneration,
+            "short_term_memory": updated_short_term,
         }
 
     except Exception as e:
