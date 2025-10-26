@@ -4,16 +4,17 @@
 from __future__ import annotations
 
 from .graphiti import (
-    GraphitiMemoryManager,
+    GraphitiMCPConnector,
     GraphitiMemorySettings,
-    MemorySnapshot,
-    get_memory_manager,
+    get_graphiti_connector,
 )
+from .short_term import ShortTermMemoryStore, ShortTermContext, get_short_term_store
 
 __all__ = [
-    "GraphitiMemoryManager",
+    "GraphitiMCPConnector",
     "GraphitiMemorySettings",
-    "MemorySnapshot",
-    "get_memory_manager",
+    "ShortTermContext",
+    "ShortTermMemoryStore",
+    "get_graphiti_connector",
+    "get_short_term_store",
 ]
-

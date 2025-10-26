@@ -4,9 +4,11 @@ LangGraph Workflow 구성
 
 Self-RAG + CRAG = Self-CRAG 기반 Agentic RAG 그래프
 """
-
+import sqlite3
 from typing import Dict, Any, Literal, List
-from langgraph.graph import StateGraph, END
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, StateGraph
 
 from src.graph.state import RAGState
 from src.graph.nodes import (
@@ -21,6 +23,19 @@ from src.graph.nodes import (
     generate_answer_node,
     evaluate_answer_node,
 )
+from src.memory import get_short_term_store
+
+_CHECKPOINTER: SqliteSaver | None = None
+
+
+def _get_checkpointer() -> SqliteSaver:
+    """Return a shared SqliteSaver using the short-term memory database."""
+    global _CHECKPOINTER
+    if _CHECKPOINTER is None:
+        store = get_short_term_store()
+        connection = sqlite3.connect(store.db_path, check_same_thread=False)
+        _CHECKPOINTER = SqliteSaver(connection)
+    return _CHECKPOINTER
 
 
 # === Task 6.2: Self-RAG 조건부 엣지 ===
@@ -176,7 +191,7 @@ def build_rag_graph():
     )
 
     # 컴파일
-    app = workflow.compile()
+    app = workflow.compile(checkpointer=_get_checkpointer())
 
     return app
 
@@ -254,6 +269,7 @@ def run_rag(
     )
 
     # 그래프 실행
-    final_state = graph.invoke(initial_state)
+    config = {"configurable": {"thread_id": session_id or "default"}}
+    final_state = graph.invoke(initial_state, config)
 
     return final_state

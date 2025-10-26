@@ -1,14 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Graphiti MCP integration for LangGraph memory.
-
-This module provides a thin wrapper around the ``langchain-mcp-adapters`` client
-so the Agentic RAG graph can blend short-term conversation history with
-Graphiti-backed long-term memory.
-
-It is intentionally defensive: if Graphiti configuration is missing or the MCP
-client is unavailable, the manager degrades gracefully and simply relies on
-the in-process short-term buffer.
-"""
+"""Graphiti MCP integration helpers and LangChain tool wrappers."""
 
 from __future__ import annotations
 
@@ -16,16 +7,22 @@ import asyncio
 import json
 import os
 import shlex
-from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
+
+try:
+    from langchain_core.tools import BaseTool, StructuredTool
+    from pydantic import BaseModel, Field
+except ImportError:  # pragma: no cover - optional dependency path
+    BaseTool = None  # type: ignore[assignment]
+    StructuredTool = None  # type: ignore[assignment]
+    BaseModel = object  # type: ignore[assignment]
+    Field = None  # type: ignore[assignment]
 
 try:
     from langchain_mcp_adapters.client import MultiServerMCPClient
-    from langchain_mcp_adapters.tools import load_mcp_tools
 except ImportError:  # pragma: no cover - optional dependency path
     MultiServerMCPClient = None  # type: ignore[assignment]
-    load_mcp_tools = None  # type: ignore[assignment]
 
 try:
     from mcp.types import CallToolResult
@@ -62,7 +59,6 @@ class GraphitiMemorySettings:
     url: str | None = field(default=None)
     headers: Dict[str, str] = field(default_factory=dict)
     env: Dict[str, str] = field(default_factory=dict)
-    short_term_window: int = field(default=5)
     search_tool: str | None = field(default="graphiti.search_memories")
     upsert_tool: str | None = field(default="graphiti.upsert_memory")
     namespace: str = field(default="agentic-rag")
@@ -78,7 +74,6 @@ class GraphitiMemorySettings:
         url = os.getenv("GRAPHITI_MCP_URL")
         headers = _parse_json_env(os.getenv("GRAPHITI_MCP_HEADERS"), {})
         proc_env = _parse_json_env(os.getenv("GRAPHITI_MCP_ENV"), {})
-        short_term_window = int(os.getenv("GRAPHITI_SHORT_TERM_WINDOW", "5") or "5")
         search_tool = os.getenv("GRAPHITI_MCP_SEARCH_TOOL", "graphiti.search_memories")
         upsert_tool = os.getenv("GRAPHITI_MCP_UPSERT_TOOL", "graphiti.upsert_memory")
         namespace = os.getenv("GRAPHITI_MEMORY_NAMESPACE", "agentic-rag")
@@ -102,7 +97,6 @@ class GraphitiMemorySettings:
             url=url,
             headers=headers,
             env=proc_env,
-            short_term_window=short_term_window,
             search_tool=search_tool,
             upsert_tool=upsert_tool,
             namespace=namespace,
@@ -112,42 +106,17 @@ class GraphitiMemorySettings:
         )
 
 
-@dataclass(slots=True)
-class MemorySnapshot:
-    """Return payload when fetching memory context."""
-
-    short_term: List[str]
-    long_term: List[str]
-    raw_result: Dict[str, Any] = field(default_factory=dict)
-    from_graphiti: bool = field(default=False)
-    error: str | None = field(default=None)
-
-    @property
-    def has_long_term(self) -> bool:
-        return bool(self.long_term)
-
-
-class GraphitiMemoryManager:
-    """Handle short-term buffering and Graphiti-backed long-term memory."""
+class GraphitiMCPConnector:
+    """Thin async wrapper over the Graphiti MCP server."""
 
     def __init__(self, settings: GraphitiMemorySettings | None = None) -> None:
         self.settings = settings or GraphitiMemorySettings.from_env()
-        self._short_term = deque(maxlen=self.settings.short_term_window)
         self._client: MultiServerMCPClient | None = None
         self._client_lock = asyncio.Lock()
-        self._tools_cache: Dict[str, Any] | None = None
 
     @property
     def is_enabled(self) -> bool:
-        return bool(self.settings.enabled)
-
-    def get_short_term(self) -> List[str]:
-        return list(self._short_term)
-
-    def _namespace(self, session_id: str | None = None) -> Sequence[str]:
-        if session_id:
-            return (self.settings.namespace, session_id)
-        return (self.settings.namespace, "default")
+        return bool(self.settings.enabled and MultiServerMCPClient is not None)
 
     async def _ensure_client(self) -> MultiServerMCPClient:
         if not self.is_enabled:
@@ -183,156 +152,158 @@ class GraphitiMemoryManager:
             return self._client
 
     async def _call_tool(
-        self, tool_name: str, arguments: Dict[str, Any]
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
     ) -> CallToolResult | None:
         client = await self._ensure_client()
         async with client.session(self.settings.server_name) as session:
-            result = await session.call_tool(tool_name, arguments)
-            return result
+            return await session.call_tool(tool_name, arguments)
 
-    def fetch_context(
+    def _namespace(self, session_id: str | None) -> List[str]:
+        suffix = session_id or "default"
+        return [self.settings.namespace, suffix]
+
+    async def search_memories(
         self,
         *,
+        session_id: str | None,
         query: str,
-        session_id: str | None = None,
         limit: int | None = None,
-    ) -> MemorySnapshot:
+    ) -> Dict[str, Any]:
         if not self.is_enabled or not self.settings.search_tool:
-            return MemorySnapshot(
-                short_term=self.get_short_term(),
-                long_term=[],
-                raw_result={},
-                from_graphiti=False,
-            )
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(
-                self.afetch_context(query=query, session_id=session_id, limit=limit)
-            )
-        else:  # pragma: no cover - not expected in sync graph execution
-            return loop.run_until_complete(
-                self.afetch_context(query=query, session_id=session_id, limit=limit)
-            )
-
-    async def afetch_context(
-        self,
-        *,
-        query: str,
-        session_id: str | None = None,
-        limit: int | None = None,
-    ) -> MemorySnapshot:
-        if not self.is_enabled or not self.settings.search_tool:
-            return MemorySnapshot(
-                short_term=self.get_short_term(),
-                long_term=[],
-                raw_result={},
-                from_graphiti=False,
-            )
+            return {"memories": [], "diagnostics": None}
 
         try:
             result = await self._call_tool(
                 self.settings.search_tool,
                 {
-                    "namespace": list(self._namespace(session_id)),
+                    "namespace": self._namespace(session_id),
                     "query": query,
                     "limit": limit or self.settings.search_limit,
                 },
             )
         except Exception as exc:  # pragma: no cover - network except path
-            return MemorySnapshot(
-                short_term=self.get_short_term(),
-                long_term=[],
-                raw_result={},
-                from_graphiti=False,
-                error=str(exc),
-            )
+            return {"memories": [], "diagnostics": {"error": str(exc)}}
 
-        memories: List[str] = []
-        raw_payload: Dict[str, Any] = {}
-
+        texts: List[str] = []
+        diagnostics: Dict[str, Any] | None = None
         if result is not None:
-            raw_payload = {
-                "content": getattr(result, "content", None),
-                "diagnostics": getattr(result, "diagnostics", None),
-            }
+            diagnostics = getattr(result, "diagnostics", None)
+            for content in getattr(result, "content", []) or []:
+                text = getattr(content, "text", None)
+                if text:
+                    texts.append(text)
+                elif isinstance(content, dict) and content.get("text"):
+                    texts.append(str(content["text"]))
 
-            content_items = getattr(result, "content", None)
-            if isinstance(content_items, list):
-                for item in content_items:
-                    text = getattr(item, "text", None)
-                    if text:
-                        memories.append(text)
-                    elif isinstance(item, dict):
-                        txt = item.get("text")
-                        if txt:
-                            memories.append(str(txt))
+        return {"memories": texts, "diagnostics": diagnostics}
 
-        return MemorySnapshot(
-            short_term=self.get_short_term(),
-            long_term=memories,
-            raw_result=raw_payload,
-            from_graphiti=bool(memories),
-        )
-
-    def store_interaction(
+    async def upsert_memory(
         self,
         *,
+        session_id: str | None,
         question: str,
         answer: str,
+        summary: str | None = None,
         metadata: Dict[str, Any] | None = None,
-        session_id: str | None = None,
-    ) -> None:
-        """Persist the latest interaction in both buffers."""
-        metadata = metadata or {}
-        summary = self._summarize_interaction(question, answer)
-        self._short_term.append(summary)
-
+    ) -> bool:
         if not self.is_enabled or not self.settings.upsert_tool:
-            return
+            return False
 
         payload = {
-            "namespace": list(self._namespace(session_id)),
+            "namespace": self._namespace(session_id),
             "memory": {
-                "summary": summary,
+                "summary": summary
+                or f"Q: {question.strip()}\nA: {answer.strip()}",
                 "question": question,
                 "answer": answer,
-                "metadata": metadata,
+                "metadata": metadata or {},
                 "tags": self.settings.metadata_tags,
             },
         }
 
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(self._astore_payload(payload))
-        else:  # pragma: no cover - not expected in sync graph execution
-            loop.run_until_complete(self._astore_payload(payload))
-
-    async def _astore_payload(self, payload: Dict[str, Any]) -> None:
-        try:
             await self._call_tool(self.settings.upsert_tool, payload)
         except Exception:  # pragma: no cover - network except path
-            # Swallow errors to keep the agent running.
-            return
+            return False
+        return True
 
-    @staticmethod
-    def _summarize_interaction(question: str, answer: str) -> str:
-        q = question.strip().replace("\n", " ")
-        a = answer.strip().replace("\n", " ")
-        if len(q) > 300:
-            q = q[:297] + "..."
-        if len(a) > 500:
-            a = a[:497] + "..."
-        return f"Q: {q}\nA: {a}"
+    def build_tools(self, session_id: str) -> List[BaseTool]:
+        """Create LangChain tools that proxy Graphiti MCP operations."""
+        if not self.is_enabled or StructuredTool is None:
+            return []
+
+        connector = self
+        resolved_session = session_id
+
+        class GraphitiSearchInput(BaseModel):  # type: ignore[misc,valid-type]
+            query: str = Field(..., description="사용자 요청과 관련된 검색 질의")
+            limit: Optional[int] = Field(
+                default=None, description="검색 결과 개수 (기본값 5)"
+            )
+
+        class GraphitiUpsertInput(BaseModel):  # type: ignore[misc,valid-type]
+            question: str = Field(..., description="사용자 질문 원문")
+            answer: str = Field(..., description="AI가 제공한 답변 원문")
+            summary: Optional[str] = Field(
+                default=None, description="질문-답변에 대한 요약 (없으면 자동 생성)"
+            )
+            metadata: Optional[Dict[str, Any]] = Field(
+                default=None, description="추가 메타데이터 (JSON 객체)"
+            )
+
+        async def search_tool(**kwargs: Any) -> str:
+            result = await connector.search_memories(
+                session_id=resolved_session,
+                query=kwargs["query"],
+                limit=kwargs.get("limit"),
+            )
+            payload = result.get("memories", [])
+            if not payload:
+                return "관련된 장기 기억을 찾지 못했습니다."
+            return "\n\n".join(str(item) for item in payload)
+
+        async def upsert_tool(**kwargs: Any) -> str:
+            success = await connector.upsert_memory(
+                session_id=resolved_session,
+                question=kwargs["question"],
+                answer=kwargs["answer"],
+                summary=kwargs.get("summary"),
+                metadata=kwargs.get("metadata"),
+            )
+            return (
+                "장기 기억에 대화를 기록했습니다." if success else "장기 기억 저장에 실패했습니다."
+            )
+
+        search = StructuredTool(
+            name="graphiti_search_memories",
+            description=(
+                "Graphiti MCP 그래프에서 사용자의 상담 기록과 관련된 장기 기억을 검색합니다."
+            ),
+            args_schema=GraphitiSearchInput,
+            coroutine=search_tool,
+        )
+        upsert = StructuredTool(
+            name="graphiti_upsert_memory",
+            description=(
+                "현재 상담 내용을 Graphiti MCP 장기 기억에 저장하거나 갱신합니다. "
+                "최종 답변을 전달하기 전에 호출하여 로그를 남기세요."
+            ),
+            args_schema=GraphitiUpsertInput,
+            coroutine=upsert_tool,
+        )
+
+        return [search, upsert]
 
 
-_GLOBAL_MANAGER: GraphitiMemoryManager | None = None
+_GLOBAL_CONNECTOR: GraphitiMCPConnector | None = None
 
 
-def get_memory_manager() -> GraphitiMemoryManager:
-    global _GLOBAL_MANAGER
-    if _GLOBAL_MANAGER is None:
-        _GLOBAL_MANAGER = GraphitiMemoryManager()
-    return _GLOBAL_MANAGER
+def get_graphiti_connector() -> GraphitiMCPConnector:
+    """Return a process-wide Graphiti MCP connector."""
+    global _GLOBAL_CONNECTOR
+    if _GLOBAL_CONNECTOR is None:
+        _GLOBAL_CONNECTOR = GraphitiMCPConnector()
+    return _GLOBAL_CONNECTOR
+
