@@ -4,6 +4,10 @@ Self-RAG 평가자 테스트 및 예제
 
 import sys
 import os
+import pytest
+
+if not os.getenv("OPENAI_API_KEY"):
+    pytest.skip("OpenAI API 키가 설정되어 있지 않아 Self-RAG 평가자 테스트를 건너뜁니다.", allow_module_level=True)
 
 # 프로젝트 루트를 Python 경로에 추가
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
