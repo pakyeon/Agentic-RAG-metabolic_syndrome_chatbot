@@ -56,3 +56,7 @@ node_modules/
 # Task files
 tasks.json
 tasks/ 
+
+# config
+.cursor/
+.taskmaster/
