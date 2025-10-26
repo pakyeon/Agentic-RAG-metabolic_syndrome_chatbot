@@ -136,9 +136,11 @@ print(result.reason)    # 판단 근거
 
 ---
 
-## 🧠 Graphiti MCP 메모리 사용법
+## 🧠 SQLite 단기 기억 + Graphiti MCP 장기 기억
 
-메모리 매니저는 `src/memory/graphiti.py`에 구현되어 있으며, 기본적으로 안전하게 비활성화된 상태로 동작합니다. Graphiti MCP 서버 정보를 제공하면 LangGraph 에이전트가 장·단기 기억을 통합적으로 활용합니다.
+단기 기억은 `src/memory/short_term.py`의 `ShortTermMemoryStore`가 SQLite에 저장하며,
+장기 기억은 `src/memory/graphiti.py`의 `GraphitiMCPConnector`가 Graphiti MCP 서버를 통해 관리합니다.
+Graphiti 서버 정보가 없으면 단기 기억만으로 안전하게 동작합니다.
 
 ### 1. 필수 환경 변수
 
@@ -157,19 +159,23 @@ GRAPHITI_MCP_HEADERS='{"Authorization": "Bearer ..."}'
 GRAPHITI_MCP_ENV='{"GRAPHITI_API_KEY": "..."}'
 GRAPHITI_MEMORY_NAMESPACE=metabolic-syndrome
 GRAPHITI_MEMORY_SEARCH_LIMIT=5
-GRAPHITI_SHORT_TERM_WINDOW=5
 GRAPHITI_MCP_SEARCH_TOOL=graphiti.search_memories
 GRAPHITI_MCP_UPSERT_TOOL=graphiti.upsert_memory
 GRAPHITI_MEMORY_TAGS='["agentic-rag"]'
+# 단기 기억 DB 경로 (선택)
+# SHORT_TERM_MEMORY_DB=/path/to/memory.sqlite3
 ```
 
 ### 2. 메모리 흐름
 
-1. `load_memory_context_node`가 그래프 초기에 호출되어 Graphiti에서 장기 기억을 검색하고, 최근 단기 버퍼와 함께 상태에 주입합니다.
-2. `generate_answer_node`는 단기/장기 기억을 프롬프트에 포함하여 환자 맞춤 답변을 강화합니다.
-3. `evaluate_answer_node`는 답변 평가 후 `GraphitiMemoryManager`를 통해 상담 로그를 영속화하고 단기 버퍼를 갱신합니다.
+1. `load_memory_context_node`가 SQLite에 저장된 단기 기억을 불러와 LangGraph 상태에 주입합니다.  
+   - 최근 3턴: 원문 그대로  
+   - 4~9턴: 히스토리 요약  
+   - 10턴 이후: 주제별 요약
+2. `generate_answer_node`는 `graphiti_search_memories`, `graphiti_upsert_memory` 도구를 에이전트에 노출해 LLM이 필요할 때 장기 기억을 조회하거나 업데이트하도록 합니다.
+3. `evaluate_answer_node`는 답변 품질을 계산한 뒤 대화 내용을 SQLite 단기 기억에 기록합니다(장기 기억 저장은 에이전트의 도구 호출로 처리).
 
-Graphiti 구성 없이 실행하면 메모리 매니저는 자동으로 안전 모드로 동작하며, 단기 버퍼만 사용합니다.
+Graphiti 구성이 없더라도 단기 기억은 SQLite로 유지되며, 장기 기억 관련 도구는 자동으로 비활성화됩니다.
 
 **판단 기준:**
 - 구체적인 사실 정보 필요 → `yes`

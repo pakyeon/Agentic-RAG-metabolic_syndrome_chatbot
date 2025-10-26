@@ -53,10 +53,11 @@ node_modules/
 *.sw?
 # OS specific
 
-# Task files
-tasks.json
-tasks/ 
-
 # config
 .cursor/
 .taskmaster/
+.cache/
+
+# Task files
+# tasks.json
+# tasks/ 
