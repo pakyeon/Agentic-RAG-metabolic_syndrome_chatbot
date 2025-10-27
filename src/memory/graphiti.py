@@ -10,10 +10,9 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel, Field
-
+from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 
 from mcp.types import CallToolResult
 
@@ -101,6 +100,7 @@ class GraphitiMCPConnector:
         self.settings = settings or GraphitiMemorySettings.from_env()
         self._client: MultiServerMCPClient | None = None
         self._client_lock = asyncio.Lock()
+        self._tools_cache: Dict[str, List[BaseTool]] = {}
 
     @property
     def is_enabled(self) -> bool:
@@ -218,72 +218,45 @@ class GraphitiMCPConnector:
 
     def build_tools(self, session_id: str) -> List[BaseTool]:
         """Create LangChain tools that proxy Graphiti MCP operations."""
-        if not self.is_enabled or StructuredTool is None:
+        if not self.is_enabled:
             return []
 
         connector = self
         resolved_session = session_id
 
-        class GraphitiSearchInput(BaseModel):  # type: ignore[misc,valid-type]
-            query: str = Field(..., description="사용자 요청과 관련된 검색 질의")
-            limit: Optional[int] = Field(
-                default=None, description="검색 결과 개수 (기본값 5)"
-            )
+        if resolved_session in self._tools_cache:
+            return self._tools_cache[resolved_session]
 
-        class GraphitiUpsertInput(BaseModel):  # type: ignore[misc,valid-type]
-            question: str = Field(..., description="사용자 질문 원문")
-            answer: str = Field(..., description="AI가 제공한 답변 원문")
-            summary: Optional[str] = Field(
-                default=None, description="질문-답변에 대한 요약 (없으면 자동 생성)"
-            )
-            metadata: Optional[Dict[str, Any]] = Field(
-                default=None, description="추가 메타데이터 (JSON 객체)"
-            )
+        async def _load_remote_tools() -> List[BaseTool]:
+            client = await connector._ensure_client()
+            async with client.session(connector.settings.server_name) as session:
+                tools = await load_mcp_tools(session)
 
-        async def search_tool(**kwargs: Any) -> str:
-            result = await connector.search_memories(
-                session_id=resolved_session,
-                query=kwargs["query"],
-                limit=kwargs.get("limit"),
-            )
-            payload = result.get("memories", [])
-            if not payload:
-                return "관련된 장기 기억을 찾지 못했습니다."
-            return "\n\n".join(str(item) for item in payload)
+            rename_map = {
+                connector.settings.search_tool: "graphiti_search_memories",
+                connector.settings.upsert_tool: "graphiti_upsert_memory",
+            }
 
-        async def upsert_tool(**kwargs: Any) -> str:
-            success = await connector.upsert_memory(
-                session_id=resolved_session,
-                question=kwargs["question"],
-                answer=kwargs["answer"],
-                summary=kwargs.get("summary"),
-                metadata=kwargs.get("metadata"),
-            )
-            return (
-                "장기 기억에 대화를 기록했습니다."
-                if success
-                else "장기 기억 저장에 실패했습니다."
-            )
+            selected: List[BaseTool] = []
+            for tool in tools:
+                if tool.name in rename_map:
+                    tool.name = rename_map[tool.name]
+                    selected.append(tool)
 
-        search = StructuredTool(
-            name="graphiti_search_memories",
-            description=(
-                "Graphiti MCP 그래프에서 사용자의 상담 기록과 관련된 장기 기억을 검색합니다."
-            ),
-            args_schema=GraphitiSearchInput,
-            coroutine=search_tool,
-        )
-        upsert = StructuredTool(
-            name="graphiti_upsert_memory",
-            description=(
-                "현재 상담 내용을 Graphiti MCP 장기 기억에 저장하거나 갱신합니다. "
-                "최종 답변을 전달하기 전에 호출하여 로그를 남기세요."
-            ),
-            args_schema=GraphitiUpsertInput,
-            coroutine=upsert_tool,
-        )
+            return selected
 
-        return [search, upsert]
+        try:
+            tools = asyncio.run(_load_remote_tools())
+        except RuntimeError:
+            # Already inside an event loop – create a dedicated loop
+            loop = asyncio.new_event_loop()
+            try:
+                tools = loop.run_until_complete(_load_remote_tools())
+            finally:
+                loop.close()
+
+        self._tools_cache[resolved_session] = tools
+        return tools
 
 
 _GLOBAL_CONNECTOR: GraphitiMCPConnector | None = None
