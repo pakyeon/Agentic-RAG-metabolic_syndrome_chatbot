@@ -10,24 +10,12 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-try:
-    from langchain_core.tools import BaseTool, StructuredTool
-    from pydantic import BaseModel, Field
-except ImportError:  # pragma: no cover - optional dependency path
-    BaseTool = None  # type: ignore[assignment]
-    StructuredTool = None  # type: ignore[assignment]
-    BaseModel = object  # type: ignore[assignment]
-    Field = None  # type: ignore[assignment]
+from langchain_core.tools import BaseTool, StructuredTool
+from pydantic import BaseModel, Field
 
-try:
-    from langchain_mcp_adapters.client import MultiServerMCPClient
-except ImportError:  # pragma: no cover - optional dependency path
-    MultiServerMCPClient = None  # type: ignore[assignment]
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
-try:
-    from mcp.types import CallToolResult
-except Exception:  # pragma: no cover - optional dependency path
-    CallToolResult = Any  # type: ignore[assignment]
+from mcp.types import CallToolResult
 
 
 def _parse_json_env(value: str | None, default: Dict[str, Any]) -> Dict[str, Any]:
@@ -214,8 +202,7 @@ class GraphitiMCPConnector:
         payload = {
             "namespace": self._namespace(session_id),
             "memory": {
-                "summary": summary
-                or f"Q: {question.strip()}\nA: {answer.strip()}",
+                "summary": summary or f"Q: {question.strip()}\nA: {answer.strip()}",
                 "question": question,
                 "answer": answer,
                 "metadata": metadata or {},
@@ -273,7 +260,9 @@ class GraphitiMCPConnector:
                 metadata=kwargs.get("metadata"),
             )
             return (
-                "장기 기억에 대화를 기록했습니다." if success else "장기 기억 저장에 실패했습니다."
+                "장기 기억에 대화를 기록했습니다."
+                if success
+                else "장기 기억 저장에 실패했습니다."
             )
 
         search = StructuredTool(
@@ -306,4 +295,3 @@ def get_graphiti_connector() -> GraphitiMCPConnector:
     if _GLOBAL_CONNECTOR is None:
         _GLOBAL_CONNECTOR = GraphitiMCPConnector()
     return _GLOBAL_CONNECTOR
-
