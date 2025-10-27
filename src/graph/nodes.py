@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from typing import Dict, List
 
-from langchain.agents import AgentExecutor, create_openai_functions_agent
+from langchain.agents import create_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 
@@ -350,7 +350,9 @@ def generate_answer_node(state: RAGState) -> Dict:
 
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY가 설정되지 않아 답변을 생성할 수 없습니다.")
+            raise RuntimeError(
+                "OPENAI_API_KEY가 설정되지 않아 답변을 생성할 수 없습니다."
+            )
 
         llm = ChatOpenAI(
             model="gpt-5-mini",
@@ -382,12 +384,15 @@ def generate_answer_node(state: RAGState) -> Dict:
             context_segments.append(f"**환자 정보:**\n{patient_context}")
         if short_term_memory:
             context_segments.append(
-                "**단기 기억:**\n" + "\n\n".join(str(item) for item in short_term_memory)
+                "**단기 기억:**\n"
+                + "\n\n".join(str(item) for item in short_term_memory)
             )
         if merged_context:
             context_segments.append(f"**참고 자료:**\n{merged_context}")
 
-        context_payload = "\n\n".join(context_segments) if context_segments else "컨텍스트 없음"
+        context_payload = (
+            "\n\n".join(context_segments) if context_segments else "컨텍스트 없음"
+        )
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -399,13 +404,8 @@ def generate_answer_node(state: RAGState) -> Dict:
         )
 
         if graphiti_tools:
-            agent = create_openai_functions_agent(llm, graphiti_tools, prompt)
-            executor = AgentExecutor(
-                agent=agent,
-                tools=graphiti_tools,
-                verbose=False,
-            )
-            response = executor.invoke(
+            agent = create_agent(llm, graphiti_tools, prompt)
+            response = agent.invoke(
                 {
                     "context": context_payload,
                     "question": question,
