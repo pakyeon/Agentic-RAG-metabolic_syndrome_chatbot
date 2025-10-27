@@ -12,12 +12,12 @@
         └── part-01.md
 """
 
-import os
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from langchain_core.documents import Document
+from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import (
     MarkdownHeaderTextSplitter,
     RecursiveCharacterTextSplitter,
@@ -65,37 +65,29 @@ class MetabolicSyndromeDocumentLoader:
         if self.raw_dir:
             print(f"  - Raw 디렉토리: {self.raw_dir}")
 
-    def _enumerate_md_parts(self) -> dict:
-        """parsed/ 폴더의 모든 part-XX.md 파일 수집
-
-        Returns:
-            {basename: [(part_index, md_path), ...]}
-        """
-        result = {}
+    def _collect_md_parts(self) -> Dict[str, List[Path]]:
+        """Collect markdown part files grouped by basename."""
+        grouped: Dict[str, List[Path]] = {}
 
         if not self.parsed_dir.is_dir():
-            return result
+            return grouped
 
-        for basename_dir in sorted(self.parsed_dir.iterdir()):
-            if not basename_dir.is_dir():
+        for md_path in sorted(self.parsed_dir.rglob("part-*.md")):
+            if not md_path.is_file():
                 continue
 
-            basename = basename_dir.name
-            parts = []
+            match = self.PART_FILE_PATTERN.match(md_path.name)
+            if not match:
+                continue
 
-            for file_path in sorted(basename_dir.iterdir()):
-                match = self.PART_FILE_PATTERN.match(file_path.name)
-                if not match:
-                    continue
+            basename = md_path.parent.name
+            grouped.setdefault(basename, []).append(md_path)
 
-                part_index = int(match.group(1))
-                parts.append((part_index, file_path))
+        # Ensure deterministic ordering
+        for parts in grouped.values():
+            parts.sort()
 
-            if parts:
-                parts.sort(key=lambda x: x[0])
-                result[basename] = parts
-
-        return result
+        return grouped
 
     def _resolve_pdf_path(self, basename: str) -> Optional[str]:
         """원본 PDF 경로 찾기
@@ -118,45 +110,66 @@ class MetabolicSyndromeDocumentLoader:
         Returns:
             Document 리스트 (LangChain Document)
         """
-        documents = []
-        md_parts = self._enumerate_md_parts()
+        md_parts = self._collect_md_parts()
 
         if not md_parts:
             print(
                 f"[Warning] parsed/ 디렉토리에서 문서를 찾을 수 없습니다: {self.parsed_dir}"
             )
-            return documents
+            return []
 
         print(f"\n[문서 로드] 총 {len(md_parts)}개 문서 발견")
 
-        for basename, parts in md_parts.items():
-            pdf_path = self._resolve_pdf_path(basename)
-            if not pdf_path:
-                print(f"  ⚠️  {basename}: 원본 PDF 없음")
+        part_counts = {basename: len(paths) for basename, paths in md_parts.items()}
+        pdf_cache: Dict[str, Optional[str]] = {}
+        missing_pdf_logged: set[str] = set()
 
-            part_count = len(parts)
+        def _metadata_func(file_path: str, metadata: dict) -> dict:
+            path = Path(file_path)
+            match = self.PART_FILE_PATTERN.match(path.name)
+            part_index = int(match.group(1)) if match else 0
+            basename = path.parent.name
 
-            for part_index, md_path in parts:
-                try:
-                    with open(md_path, "r", encoding="utf-8") as f:
-                        content = f.read()
+            if basename not in pdf_cache:
+                pdf_cache[basename] = self._resolve_pdf_path(basename)
+                if pdf_cache[basename] is None and basename not in missing_pdf_logged:
+                    print(f"  ⚠️  {basename}: 원본 PDF 없음")
+                    missing_pdf_logged.add(basename)
 
-                    # 메타데이터 구성
-                    metadata = {
-                        "source": pdf_path,  # 원본 PDF
-                        "basename": basename,
-                        "part_index": part_index,
-                        "part_count": part_count,
-                        "md_path": str(md_path),
-                        "source_id": f"{basename}#part-{part_index:02d}",
-                    }
+            enriched = {
+                **metadata,
+                "basename": basename,
+                "part_index": part_index,
+                "part_count": part_counts.get(basename, 0),
+                "md_path": str(path),
+                "source_id": f"{basename}#part-{part_index:02d}",
+            }
 
-                    # LangChain Document 생성
-                    doc = Document(page_content=content, metadata=metadata)
-                    documents.append(doc)
+            pdf_path = pdf_cache.get(basename)
+            if pdf_path:
+                enriched["source"] = pdf_path
 
-                except Exception as e:
-                    print(f"  ❌ {md_path} 로드 실패: {e}")
+            return enriched
+
+        loader = DirectoryLoader(
+            str(self.parsed_dir),
+            glob="**/part-*.md",
+            loader_cls=TextLoader,
+            loader_kwargs={"encoding": "utf-8"},
+            use_multithreading=False,
+            metadata_func=_metadata_func,
+        )
+
+        documents = loader.load()
+        documents = [
+            doc for doc in documents if len(doc.page_content.strip()) >= self.min_content_length
+        ]
+        documents.sort(
+            key=lambda doc: (
+                doc.metadata.get("basename", ""),
+                int(doc.metadata.get("part_index", 0)),
+            )
+        )
 
         print(f"[완료] {len(documents)}개 MD 파트 파일 로드됨\n")
         return documents
@@ -167,7 +180,7 @@ class MetabolicSyndromeDocumentLoader:
         Returns:
             문서 통계 정보
         """
-        md_parts = self._enumerate_md_parts()
+        md_parts = self._collect_md_parts()
 
         total_parts = sum(len(parts) for parts in md_parts.values())
 

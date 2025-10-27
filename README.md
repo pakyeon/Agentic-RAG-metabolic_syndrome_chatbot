@@ -58,6 +58,12 @@ LangGraph 기반 Agentic RAG 시스템으로, Self-RAG의 Reflection Tokens와 C
   - 대사증후군 관련 의료 문서 임베딩
   - Hybrid Retrieval (Semantic + BM25)
 
+### 4. **Graphiti MCP 기반 장·단기 기억**
+- **langchain-mcp-adapter**로 Graphiti MCP 서버를 LangGraph Agent에 연결
+- **단기 기억**: 세션 내 최근 QA를 메모리 버퍼에 보관하여 즉각적인 회상 지원
+- **장기 기억**: Graphiti MCP에 상담 로그를 영속화하고 세션별로 검색
+- **유연한 설정**: `GRAPHITI_MCP_*` 환경 변수를 통해 stdio/HTTP 등 다양한 트랜스포트를 구성
+
 ---
 
 ## 🔄 시스템 워크플로우
@@ -127,6 +133,49 @@ result = evaluator.evaluate_retrieve_need(
 print(result.decision)  # "yes" or "no"
 print(result.reason)    # 판단 근거
 ```
+
+---
+
+## 🧠 SQLite 단기 기억 + Graphiti MCP 장기 기억
+
+단기 기억은 `src/memory/short_term.py`의 `ShortTermMemoryStore`가 SQLite에 저장하며,
+장기 기억은 `src/memory/graphiti.py`의 `GraphitiMCPConnector`가 Graphiti MCP 서버를 통해 관리합니다.
+Graphiti 서버 정보가 없으면 단기 기억만으로 안전하게 동작합니다.
+
+### 1. 필수 환경 변수
+
+```
+GRAPHITI_MCP_TRANSPORT=stdio            # 또는 streamable_http / sse / websocket
+GRAPHITI_MCP_COMMAND=graphiti-mcp       # stdio 사용 시 서버 실행 커맨드
+GRAPHITI_MCP_ARGS="serve --workspace /path/to/workspace"
+# 또는 HTTP 기반 사용 시
+# GRAPHITI_MCP_URL=https://graphiti.example.com/mcp
+```
+
+필요 시 아래 옵션도 사용할 수 있습니다.
+
+```
+GRAPHITI_MCP_HEADERS='{"Authorization": "Bearer ..."}'
+GRAPHITI_MCP_ENV='{"GRAPHITI_API_KEY": "..."}'
+GRAPHITI_MEMORY_NAMESPACE=metabolic-syndrome
+GRAPHITI_MEMORY_SEARCH_LIMIT=5
+GRAPHITI_MCP_SEARCH_TOOL=graphiti.search_memories
+GRAPHITI_MCP_UPSERT_TOOL=graphiti.upsert_memory
+GRAPHITI_MEMORY_TAGS='["agentic-rag"]'
+# 단기 기억 DB 경로 (선택)
+# SHORT_TERM_MEMORY_DB=/path/to/memory.sqlite3
+```
+
+### 2. 메모리 흐름
+
+1. `load_memory_context_node`가 SQLite에 저장된 단기 기억을 불러와 LangGraph 상태에 주입합니다.  
+   - 최근 3턴: 원문 그대로  
+   - 4~9턴: 히스토리 요약  
+   - 10턴 이후: 주제별 요약
+2. `generate_answer_node`는 `graphiti_search_memories`, `graphiti_upsert_memory` 도구를 에이전트에 노출해 LLM이 필요할 때 장기 기억을 조회하거나 업데이트하도록 합니다.
+3. `evaluate_answer_node`는 답변 품질을 계산한 뒤 대화 내용을 SQLite 단기 기억에 기록합니다(장기 기억 저장은 에이전트의 도구 호출로 처리).
+
+Graphiti 구성이 없더라도 단기 기억은 SQLite로 유지되며, 장기 기억 관련 도구는 자동으로 비활성화됩니다.
 
 **판단 기준:**
 - 구체적인 사실 정보 필요 → `yes`

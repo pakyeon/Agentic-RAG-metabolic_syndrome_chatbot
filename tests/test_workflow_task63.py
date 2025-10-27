@@ -3,6 +3,10 @@
 
 import sys
 import os
+import pytest
+
+if not os.getenv("OPENAI_API_KEY"):
+    pytest.skip("OpenAI API 키가 없어 Task 6.3 워크플로우 테스트를 건너뜁니다.", allow_module_level=True)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

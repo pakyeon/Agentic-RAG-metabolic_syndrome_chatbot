@@ -4,6 +4,13 @@ CRAG (Corrective RAG) 전략 테스트
 
 import sys
 import os
+import pytest
+
+if not os.getenv("OPENAI_API_KEY") or not os.getenv("TAVILY_API_KEY"):
+    pytest.skip(
+        "CRAG 테스트는 OpenAI 및 Tavily API 키가 필요하여 키가 없으면 건너뜁니다.",
+        allow_module_level=True,
+    )
 
 # 프로젝트 루트를 Python 경로에 추가
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
