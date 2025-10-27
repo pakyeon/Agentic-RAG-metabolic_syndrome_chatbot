@@ -7,6 +7,7 @@ VectorDB 구축 및 하이브리드 검색
 
 import os
 from pathlib import Path
+from threading import Lock
 from typing import List, Optional
 
 from langchain_chroma import Chroma
@@ -23,6 +24,8 @@ from src.data.path_utils import project_path
 DEFAULT_RAW_DIRECTORY = project_path("data/raw")
 DEFAULT_PARSED_DIRECTORY = project_path("data/parsed")
 DEFAULT_PERSIST_DIRECTORY = project_path("data/chroma_db")
+_HYBRID_RETRIEVER_CACHE: "HybridRetriever | None" = None
+_HYBRID_RETRIEVER_LOCK = Lock()
 
 
 class VectorStoreBuilder:
@@ -398,6 +401,33 @@ class HybridRetriever:
             EnsembleRetriever 인스턴스
         """
         return self.ensemble_retriever
+
+
+def get_cached_hybrid_retriever(
+    persist_directory: str | Path = DEFAULT_PERSIST_DIRECTORY,
+    parsed_dir: Optional[str | Path] = DEFAULT_PARSED_DIRECTORY,
+    raw_dir: Optional[str | Path] = DEFAULT_RAW_DIRECTORY,
+    bm25_weight: float = 0.4,
+    vector_weight: float = 0.6,
+    k: int = 5,
+) -> HybridRetriever:
+    """Return a cached HybridRetriever instance for reuse across requests."""
+    global _HYBRID_RETRIEVER_CACHE
+
+    if _HYBRID_RETRIEVER_CACHE is not None:
+        return _HYBRID_RETRIEVER_CACHE
+
+    with _HYBRID_RETRIEVER_LOCK:
+        if _HYBRID_RETRIEVER_CACHE is None:
+            builder = VectorStoreBuilder(persist_directory=persist_directory)
+            _HYBRID_RETRIEVER_CACHE = builder.create_hybrid_retriever(
+                parsed_dir=parsed_dir,
+                raw_dir=raw_dir,
+                bm25_weight=bm25_weight,
+                vector_weight=vector_weight,
+                k=k,
+            )
+    return _HYBRID_RETRIEVER_CACHE
 
 
 # 유틸리티 함수

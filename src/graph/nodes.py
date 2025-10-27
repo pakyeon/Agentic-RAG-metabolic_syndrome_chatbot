@@ -99,23 +99,9 @@ def should_retrieve_node(state: RAGState) -> Dict:
 def retrieve_internal_node(state: RAGState) -> Dict:
     """VectorDB에서 관련 문서 검색."""
     try:
-        from src.data.vector_store import HybridRetriever, load_vector_db
-        from langchain_core.documents import Document
+        from src.data.vector_store import get_cached_hybrid_retriever
 
-        vector_store = load_vector_db()
-
-        all_docs_data = vector_store.get()
-        documents = [
-            Document(page_content=content, metadata=metadata)
-            for content, metadata in zip(
-                all_docs_data.get("documents", []), all_docs_data.get("metadatas", [])
-            )
-        ]
-
-        if not documents:
-            return {"internal_docs": [], "error": "VectorDB에 문서가 없습니다"}
-
-        retriever = HybridRetriever(vectorstore=vector_store, documents=documents)
+        retriever = get_cached_hybrid_retriever()
 
         query = state["question"]
         if state.get("patient_context"):
