@@ -7,6 +7,10 @@ Tavily Tool 테스트
 
 import sys
 import os
+import pytest
+
+if not os.getenv("TAVILY_API_KEY"):
+    pytest.skip("Tavily API 키가 없어 Tavily Tool 테스트를 건너뜁니다.", allow_module_level=True)
 
 # src 디렉토리를 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

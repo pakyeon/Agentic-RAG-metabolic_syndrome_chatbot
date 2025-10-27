@@ -10,7 +10,12 @@ from langchain_tavily import TavilySearch
 
 
 def get_tavily_tool(
-    api_key: Optional[str] = None, max_results: int = 5, topic: str = "general"
+    api_key: Optional[str] = None,
+    max_results: int = 5,
+    topic: str = "general",
+    search_depth: Optional[str] = None,
+    include_answer: bool = False,
+    include_raw_content: bool = False,
 ) -> TavilySearch:
     """
     Tavily Search Tool 생성
@@ -22,6 +27,9 @@ def get_tavily_tool(
             - "general": 일반 검색 (기본, 의료 정보 포함)
             - "news": 뉴스
             - "finance": 금융
+        search_depth: 검색 깊이 ("basic" 또는 "advanced")
+        include_answer: 검색 결과에 Tavily의 요약 답변 포함 여부
+        include_raw_content: 원문 콘텐츠 전문 포함 여부
 
     Returns:
         TavilySearch Tool 인스턴스
@@ -38,11 +46,17 @@ def get_tavily_tool(
                 ".env 파일을 확인하거나 api_key 파라미터를 전달하세요."
             )
 
-    tool = TavilySearch(
-        api_key=api_key,
-        max_results=max_results,
-        topic=topic,
-    )
+    tool_kwargs = {
+        "api_key": api_key,
+        "max_results": max_results,
+        "topic": topic,
+        "include_answer": include_answer,
+        "include_raw_content": include_raw_content,
+    }
+    if search_depth:
+        tool_kwargs["search_depth"] = search_depth
+
+    tool = TavilySearch(**tool_kwargs)
 
     return tool
 

@@ -18,6 +18,11 @@ class RAGState(TypedDict):
     # 환자 정보
     patient_context: Optional[str]
 
+    # 메모리
+    short_term_memory: List[str]
+    long_term_memory: List[str]
+    memory_session_id: Optional[str]
+
     # Self-RAG Reflection Tokens
     should_retrieve: bool  # [Retrieve] 토큰
     relevance_scores: List[float]  # ISREL: 문서 관련성 (1-5)

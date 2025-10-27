@@ -4,13 +4,16 @@ LangGraph Workflow 구성
 
 Self-RAG + CRAG = Self-CRAG 기반 Agentic RAG 그래프
 """
+import sqlite3
+from typing import Dict, Any, Literal, List
 
-from typing import Dict, Any, Literal
-from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, StateGraph
 
 from src.graph.state import RAGState
 from src.graph.nodes import (
     load_patient_context_node,
+    load_memory_context_node,
     should_retrieve_node,
     retrieve_internal_node,
     evaluate_retrieval_node,
@@ -20,6 +23,19 @@ from src.graph.nodes import (
     generate_answer_node,
     evaluate_answer_node,
 )
+from src.memory import get_short_term_store
+
+_CHECKPOINTER: SqliteSaver | None = None
+
+
+def _get_checkpointer() -> SqliteSaver:
+    """Return a shared SqliteSaver using the short-term memory database."""
+    global _CHECKPOINTER
+    if _CHECKPOINTER is None:
+        store = get_short_term_store()
+        connection = sqlite3.connect(store.db_path, check_same_thread=False)
+        _CHECKPOINTER = SqliteSaver(connection)
+    return _CHECKPOINTER
 
 
 # === Task 6.2: Self-RAG 조건부 엣지 ===
@@ -116,6 +132,7 @@ def build_rag_graph():
 
     # 노드 추가 (9개)
     workflow.add_node("load_patient_context", load_patient_context_node)
+    workflow.add_node("load_memory_context", load_memory_context_node)
     workflow.add_node("should_retrieve", should_retrieve_node)
     workflow.add_node("retrieve_internal", retrieve_internal_node)
     workflow.add_node("evaluate_retrieval", evaluate_retrieval_node)
@@ -127,7 +144,8 @@ def build_rag_graph():
 
     # 엣지 연결
     workflow.set_entry_point("load_patient_context")
-    workflow.add_edge("load_patient_context", "should_retrieve")
+    workflow.add_edge("load_patient_context", "load_memory_context")
+    workflow.add_edge("load_memory_context", "should_retrieve")
 
     # Task 6.2: Self-RAG [Retrieve] 조건부 분기
     workflow.add_conditional_edges(
@@ -173,18 +191,26 @@ def build_rag_graph():
     )
 
     # 컴파일
-    app = workflow.compile()
+    app = workflow.compile(checkpointer=_get_checkpointer())
 
     return app
 
 
-def create_initial_state(question: str, patient_id: int = None) -> RAGState:
+def create_initial_state(
+    question: str,
+    patient_id: int | None = None,
+    *,
+    session_id: str | None = None,
+    short_term: List[str] | None = None,
+) -> RAGState:
     """
     초기 상태 생성 헬퍼 함수
 
     Args:
         question: 사용자 질문
         patient_id: 환자 ID (선택)
+        session_id: 장기 기억을 위한 세션/사용자 식별자
+        short_term: 이전 턴의 단기 기억(선택)
 
     Returns:
         RAGState: 초기화된 상태
@@ -193,6 +219,9 @@ def create_initial_state(question: str, patient_id: int = None) -> RAGState:
         "question": question,
         "patient_id": patient_id,
         "patient_context": None,
+        "short_term_memory": list(short_term or []),
+        "long_term_memory": [],
+        "memory_session_id": session_id,
         "should_retrieve": False,
         "relevance_scores": [],
         "support_score": 0.0,
@@ -212,21 +241,35 @@ def create_initial_state(question: str, patient_id: int = None) -> RAGState:
 
 
 # 간단한 실행 함수
-def run_rag(question: str, patient_id: int = None) -> Dict[str, Any]:
+def run_rag(
+    question: str,
+    patient_id: int | None = None,
+    *,
+    session_id: str | None = None,
+    short_term: List[str] | None = None,
+) -> Dict[str, Any]:
     """
     RAG 실행 헬퍼 함수
 
     Args:
         question: 사용자 질문
         patient_id: 환자 ID (선택)
+        session_id: 장기 기억 세션 ID (선택)
+        short_term: 이전 턴 단기 기억 (선택)
 
     Returns:
         최종 상태 딕셔너리
     """
     graph = build_rag_graph()
-    initial_state = create_initial_state(question, patient_id)
+    initial_state = create_initial_state(
+        question,
+        patient_id,
+        session_id=session_id,
+        short_term=short_term,
+    )
 
     # 그래프 실행
-    final_state = graph.invoke(initial_state)
+    config = {"configurable": {"thread_id": session_id or "default"}}
+    final_state = graph.invoke(initial_state, config)
 
     return final_state

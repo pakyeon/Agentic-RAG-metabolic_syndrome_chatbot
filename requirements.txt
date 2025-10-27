@@ -3,6 +3,7 @@ langchain>=1.0.2
 langchain-core>=1.0.0
 langchain-community>=0.4
 langgraph==1.0.1
+langchain-mcp-adapters>=0.2.0
 
 # LangChain Integrations
 langchain-openai>=1.0.1
@@ -20,6 +21,7 @@ python-dotenv>=1.1.1
 tqdm>=4.67.1
 numpy>=2.3.4
 pydantic==2.12.3
+mcp>=0.1.1
 
 # HTTP (for testing)
 requests==2.32.5

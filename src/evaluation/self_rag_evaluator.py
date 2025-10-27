@@ -3,7 +3,7 @@ Self-RAG 평가자
 """
 
 import os
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from langchain_openai import ChatOpenAI
 
@@ -100,6 +100,7 @@ class SelfRAGEvaluator:
             reasoning_effort=reasoning_effort,
             api_key=os.getenv("OPENAI_API_KEY"),
         )
+        self._prompts: Dict[str, str] = {}
 
     # ========== Task 1.3: 평가 단계 통합 ==========
 
@@ -159,7 +160,16 @@ class SelfRAGEvaluator:
             doc_preview = doc[:250] + "..." if len(doc) > 250 else doc
             docs_text += f"\n[문서 {i}]\n{doc_preview}\n"
 
-        prompt = f"""당신은 검색 품질 평가자입니다.
+        template = self._prompts.get("relevance_crag")
+
+        if template:
+            prompt = template.format(
+                query=query,
+                documents=docs_text,
+                min_relevant_docs=min_relevant_docs,
+            )
+        else:
+            prompt = f"""당신은 검색 품질 평가자입니다.
 
 **시스템 역할**:
 이 시스템은 대사증후군 상담사를 어시스턴트하는 전문 챗봇입니다.
@@ -190,7 +200,6 @@ class SelfRAGEvaluator:
 DO NOT OUTPUT ANYTHING OTHER THAN VALID JSON.
 
 출력:"""
-
         try:
             response = self.llm.invoke(prompt)
             result_text = response.content.strip()
