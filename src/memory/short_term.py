@@ -23,6 +23,15 @@ def _default_db_path() -> Path:
     if custom_path:
         return Path(custom_path).expanduser()
 
+    checkpoint_path = os.getenv("LANGGRAPH_CHECKPOINT_PATH")
+    if checkpoint_path:
+        resolved = Path(checkpoint_path).expanduser()
+        if resolved.is_dir() or checkpoint_path.endswith(os.sep):
+            resolved.mkdir(parents=True, exist_ok=True)
+            return resolved / DEFAULT_DB_FILENAME
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        return resolved
+
     project_root = Path(os.getenv("PROJECT_ROOT", Path.cwd()))
     storage_dir = project_root / ".cache"
     storage_dir.mkdir(parents=True, exist_ok=True)
