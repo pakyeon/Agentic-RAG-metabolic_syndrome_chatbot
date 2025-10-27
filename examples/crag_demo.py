@@ -241,10 +241,12 @@ def demo_full_pipeline():
     # 0단계: [Retrieve] - 검색 필요성 판단
     print("\n[0단계] Self-RAG: 검색 필요성 판단")
     retrieve_result = evaluator.evaluate_retrieve_need(query)
-    print(f"  판단: {retrieve_result.decision}")
+    print(f"  판단: {retrieve_result.should_retrieve}")
+    print(f"  난이도: {retrieve_result.difficulty}")
+    print(f"  평가 문서 수: {retrieve_result.documents_to_evaluate}")
     print(f"  이유: {retrieve_result.reason}")
 
-    if retrieve_result.decision == "no":
+    if retrieve_result.should_retrieve == "no":
         print("  → LLM 직접 답변으로 진행")
         return
 
@@ -256,7 +258,11 @@ def demo_full_pipeline():
     # 2단계: CRAG 전략 실행
     print("\n[2단계] CRAG 전략 실행")
     crag = create_corrective_rag()
-    crag_result = crag.execute(query, documents)
+    crag_result = crag.execute(
+        query,
+        documents,
+        documents_to_evaluate=retrieve_result.documents_to_evaluate or None,
+    )
 
     print(f"  액션: {crag_result.action.value.upper()}")
     print(f"  웹 검색: {'실행' if crag_result.web_search_performed else '불필요'}")
@@ -280,7 +286,7 @@ def demo_full_pipeline():
 
     # 4단계: Self-RAG 답변 품질 평가
     print("\n[4단계] Self-RAG: 답변 품질 평가")
-    answer_quality = evaluator.evaluate_answer_quality(
+    answer_quality = evaluator.assess_answer_quality(
         query, generated_answer, [doc.page_content for doc in crag_result.documents[:2]]
     )
 

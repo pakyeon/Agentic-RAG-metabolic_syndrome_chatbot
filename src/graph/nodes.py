@@ -75,15 +75,20 @@ def should_retrieve_node(state: RAGState) -> Dict:
         evaluator = SelfRAGEvaluator()
         result = evaluator.evaluate_retrieve_need(state["question"])
 
-        should_retrieve = result.decision == "yes"
+        should_retrieve = result.should_retrieve == "yes"
+        documents_to_evaluate = result.documents_to_evaluate if should_retrieve else 0
 
         return {
             "should_retrieve": should_retrieve,
             "iteration": state.get("iteration", 0) + 1,
+            "retrieve_difficulty": result.difficulty,
+            "evaluation_doc_limit": documents_to_evaluate,
             "metadata": {
                 **state.get("metadata", {}),
-                "retrieve_decision": result.decision,
+                "retrieve_decision": result.should_retrieve,
                 "retrieve_reason": result.reason,
+                "retrieve_difficulty": result.difficulty,
+                "retrieve_doc_limit": documents_to_evaluate,
             },
         }
 
@@ -150,7 +155,11 @@ def decide_crag_action_node(state: RAGState) -> Dict:
         if not docs:
             return {"crag_action": "incorrect", "crag_confidence": 0.0}
 
-        action, _ = strategy.decide_action(query=state["question"], documents=docs)
+        action, _ = strategy.decide_action(
+            query=state["question"],
+            documents=docs,
+            documents_to_evaluate=state.get("evaluation_doc_limit") or None,
+        )
 
         return {"crag_action": action.value, "crag_confidence": 1.0}
 
@@ -462,7 +471,7 @@ def evaluate_answer_node(state: RAGState) -> Dict:
                 "needs_regeneration": True,
             }
 
-        answer_quality = evaluator.evaluate_answer_quality(
+        answer_quality = evaluator.assess_answer_quality(
             query=question,
             answer=answer,
             documents=documents,

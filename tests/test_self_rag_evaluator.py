@@ -41,14 +41,18 @@ def test_retrieve():
     for query in queries_need_retrieval:
         result = evaluator.evaluate_retrieve_need(query)
         print(f"\n질문: {query}")
-        print(f"  판단: {result.decision}")
+        print(f"  판단: {result.should_retrieve}")
+        print(f"  난이도: {result.difficulty}")
+        print(f"  평가 문서 수: {result.documents_to_evaluate}")
         print(f"  이유: {result.reason}")
 
     print("\n\n[검색 불필요한 질문들]")
     for query in queries_no_retrieval:
         result = evaluator.evaluate_retrieve_need(query)
         print(f"\n질문: {query}")
-        print(f"  판단: {result.decision}")
+        print(f"  판단: {result.should_retrieve}")
+        print(f"  난이도: {result.difficulty}")
+        print(f"  평가 문서 수: {result.documents_to_evaluate}")
         print(f"  이유: {result.reason}")
 
 
@@ -207,7 +211,7 @@ def test_overall_evaluation():
     print(f"검색된 문서 수: {len(documents)}")
 
     # 1단계: 문서 평가
-    overall_eval = evaluator.evaluate_documents(query, documents)
+    overall_eval = evaluator.assess_retrieval_quality(query, documents)
 
     print(f"\n외부 검색 필요 여부: {overall_eval.should_retrieve_external}")
     print(f"사유: {overall_eval.reason}")
@@ -225,7 +229,7 @@ def test_overall_evaluation():
     print(f"\n생성된 답변:")
     print(f"  {generated_answer}")
 
-    answer_quality = evaluator.evaluate_answer_quality(
+    answer_quality = evaluator.assess_answer_quality(
         query, generated_answer, documents[:2]  # 관련 있는 문서만 사용
     )
 

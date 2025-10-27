@@ -70,7 +70,10 @@ class CorrectiveRAG:
         self.tavily_tool = get_tavily_tool(max_results=max_web_results)
 
     def decide_action(
-        self, query: str, documents: List[Document]
+        self,
+        query: str,
+        documents: List[Document],
+        documents_to_evaluate: Optional[int] = None,
     ) -> Tuple[CRAGAction, str]:
         """
         Self-RAG 평가 결과를 바탕으로 CRAG 액션 결정
@@ -87,8 +90,11 @@ class CorrectiveRAG:
 
         # Self-RAG ISREL 평가
         doc_contents = [doc.page_content for doc in documents]
-        overall_eval = self.evaluator.evaluate_documents(
-            query, doc_contents, min_relevant_docs=self.min_relevant_docs
+        overall_eval = self.evaluator.assess_retrieval_quality(
+            query,
+            doc_contents,
+            min_relevant_docs=self.min_relevant_docs,
+            documents_to_evaluate=documents_to_evaluate,
         )
 
         relevant_count = sum(
@@ -250,7 +256,12 @@ class CorrectiveRAG:
 
             return unique_docs
 
-    def execute(self, query: str, documents: List[Document]) -> CRAGResult:
+    def execute(
+        self,
+        query: str,
+        documents: List[Document],
+        documents_to_evaluate: Optional[int] = None,
+    ) -> CRAGResult:
         """
         CRAG 전략 실행
 
@@ -269,7 +280,9 @@ class CorrectiveRAG:
         original_count = len(documents)
 
         # 1단계: 액션 결정
-        action, reason = self.decide_action(query, documents)
+        action, reason = self.decide_action(
+            query, documents, documents_to_evaluate=documents_to_evaluate
+        )
 
         # 2단계: 액션 실행
         web_search_performed = False

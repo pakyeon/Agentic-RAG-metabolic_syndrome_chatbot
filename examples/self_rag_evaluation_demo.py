@@ -41,10 +41,12 @@ def simulate_rag_pipeline():
     print(f"  질문: {query}")
 
     retrieve_result = evaluator.evaluate_retrieve_need(query)
-    print(f"  판단: {retrieve_result.decision}")
+    print(f"  판단: {retrieve_result.should_retrieve}")
+    print(f"  난이도: {retrieve_result.difficulty}")
+    print(f"  평가 문서 수: {retrieve_result.documents_to_evaluate}")
     print(f"  이유: {retrieve_result.reason}")
 
-    if retrieve_result.decision == "no":
+    if retrieve_result.should_retrieve == "no":
         print("  → LLM 자체 지식으로 답변 가능. 검색 건너뜀.")
         # 실제로는 여기서 바로 LLM에게 답변 요청
         return
@@ -69,8 +71,11 @@ def simulate_rag_pipeline():
 
     # 3단계: ISREL - 검색 품질 평가
     print(f"\n[3단계] ISREL - 검색 품질 평가")
-    overall_eval = evaluator.evaluate_documents(
-        query, retrieved_documents, min_relevant_docs=2
+    overall_eval = evaluator.assess_retrieval_quality(
+        query,
+        retrieved_documents,
+        min_relevant_docs=2,
+        documents_to_evaluate=retrieve_result.documents_to_evaluate or None,
     )
 
     relevant_docs = []
@@ -113,7 +118,7 @@ def simulate_rag_pipeline():
 
     # 6단계: ISSUP & ISUSE - 답변 품질 평가
     print(f"\n[6단계] ISSUP & ISUSE - 답변 품질 평가")
-    answer_quality = evaluator.evaluate_answer_quality(
+    answer_quality = evaluator.assess_answer_quality(
         query, generated_answer, relevant_docs
     )
 
@@ -158,7 +163,9 @@ def demonstrate_edge_cases():
     general_query = "안녕하세요, 오늘 날씨 어때요?"
     retrieve_result = evaluator.evaluate_retrieve_need(general_query)
     print(f"  질문: {general_query}")
-    print(f"  검색 필요: {retrieve_result.decision}")
+    print(f"  검색 필요: {retrieve_result.should_retrieve}")
+    print(f"  난이도: {retrieve_result.difficulty}")
+    print(f"  평가 문서 수: {retrieve_result.documents_to_evaluate}")
     print(f"  이유: {retrieve_result.reason}")
 
     # Case 1: 모든 문서가 관련 없는 경우
@@ -170,7 +177,7 @@ def demonstrate_edge_cases():
         "스트레스 관리는 정신 건강에 도움이 됩니다.",
     ]
 
-    eval_result = evaluator.evaluate_documents(
+    eval_result = evaluator.assess_retrieval_quality(
         query, irrelevant_docs, min_relevant_docs=1
     )
     print(f"  외부 검색 필요: {eval_result.should_retrieve_external}")

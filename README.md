@@ -130,7 +130,9 @@ evaluator = create_evaluator()
 result = evaluator.evaluate_retrieve_need(
     "대사증후군 환자를 위한 식단은?"
 )
-print(result.decision)  # "yes" or "no"
+print(result.should_retrieve)  # "yes" | "no"  # TODO: add "continue" once contextual routing is wired
+print(result.difficulty)  # "easy" | "normal" | "hard" | "none"
+print(result.documents_to_evaluate)  # 난이도별 평가 문서 수
 print(result.reason)    # 판단 근거
 ```
 
@@ -184,7 +186,7 @@ Graphiti 구성이 없더라도 단기 기억은 SQLite로 유지되며, 장기 
 #### 2. **ISREL - 검색 결과 관련성 평가**
 ```python
 # 문서별 관련성 평가
-evaluation = evaluator.evaluate_documents(
+evaluation = evaluator.assess_retrieval_quality(
     query="대사증후군 진단 기준은?",
     documents=retrieved_docs,
     min_relevant_docs=2
