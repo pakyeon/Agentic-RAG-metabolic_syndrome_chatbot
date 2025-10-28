@@ -161,7 +161,7 @@ def test_tool_with_agent():
         print(f"✓ {len(tools)}개 도구 준비 완료")
 
         # LLM 준비
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        llm = ChatOpenAI(model="gpt-5-mini", reasoning_effort="minimal", temperature=0)
         print(f"✓ LLM 준비 완료: {llm.model_name}")
 
         # Tool binding 테스트

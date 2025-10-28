@@ -124,45 +124,54 @@ class MetabolicSyndromeDocumentLoader:
         pdf_cache: Dict[str, Optional[str]] = {}
         missing_pdf_logged: set[str] = set()
 
-        def _metadata_func(file_path: str, metadata: dict) -> dict:
-            path = Path(file_path)
-            match = self.PART_FILE_PATTERN.match(path.name)
-            part_index = int(match.group(1)) if match else 0
-            basename = path.parent.name
-
-            if basename not in pdf_cache:
-                pdf_cache[basename] = self._resolve_pdf_path(basename)
-                if pdf_cache[basename] is None and basename not in missing_pdf_logged:
-                    print(f"  ⚠️  {basename}: 원본 PDF 없음")
-                    missing_pdf_logged.add(basename)
-
-            enriched = {
-                **metadata,
-                "basename": basename,
-                "part_index": part_index,
-                "part_count": part_counts.get(basename, 0),
-                "md_path": str(path),
-                "source_id": f"{basename}#part-{part_index:02d}",
-            }
-
-            pdf_path = pdf_cache.get(basename)
-            if pdf_path:
-                enriched["source"] = pdf_path
-
-            return enriched
-
+        # ===== 수정 부분 시작 =====
+        # DirectoryLoader에서 metadata_func 제거 (지원하지 않음)
         loader = DirectoryLoader(
             str(self.parsed_dir),
             glob="**/part-*.md",
             loader_cls=TextLoader,
             loader_kwargs={"encoding": "utf-8"},
             use_multithreading=False,
-            metadata_func=_metadata_func,
+            # metadata_func 제거
         )
 
         documents = loader.load()
+
+        # 로드 후 수동으로 메타데이터 추가
+        for doc in documents:
+            file_path = doc.metadata.get("source", "")
+            path = Path(file_path)
+
+            # part-XX.md 패턴 매칭
+            match = self.PART_FILE_PATTERN.match(path.name)
+            part_index = int(match.group(1)) if match else 0
+            basename = path.parent.name
+
+            # PDF 경로 캐싱
+            if basename not in pdf_cache:
+                pdf_cache[basename] = self._resolve_pdf_path(basename)
+                if pdf_cache[basename] is None and basename not in missing_pdf_logged:
+                    print(f"  ⚠️  {basename}: 원본 PDF 없음")
+                    missing_pdf_logged.add(basename)
+
+            # 메타데이터 추가
+            doc.metadata["basename"] = basename
+            doc.metadata["part_index"] = part_index
+            doc.metadata["part_count"] = part_counts.get(basename, 0)
+            doc.metadata["md_path"] = str(path)
+            doc.metadata["source_id"] = f"{basename}#part-{part_index:02d}"
+
+            # PDF 경로가 있으면 추가
+            pdf_path = pdf_cache.get(basename)
+            if pdf_path:
+                doc.metadata["source"] = pdf_path
+        # ===== 수정 부분 끝 =====
+
+        # 최소 길이 필터링 및 정렬 (기존 코드)
         documents = [
-            doc for doc in documents if len(doc.page_content.strip()) >= self.min_content_length
+            doc
+            for doc in documents
+            if len(doc.page_content.strip()) >= self.min_content_length
         ]
         documents.sort(
             key=lambda doc: (
