@@ -12,18 +12,6 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
-def extract_answer_from_state(final_state: dict) -> str:
-    """메시지 기반 상태에서 답변 추출"""
-    messages = final_state.get("messages", [])
-
-    # 마지막 AI 메시지 찾기
-    for msg in reversed(messages):
-        if msg.type == "ai":
-            return msg.content
-
-    return "답변을 생성할 수 없습니다."
-
-
 def display_patient_list(db):
     """
     환자 리스트 표시 (exam_at 기준 최신순 정렬)
@@ -142,7 +130,7 @@ def question_loop(patient_id):
             final_state = run_rag(question, patient_id=patient_id)
 
             # 답변 출력
-            answer = extract_answer_from_state(final_state)
+            answer = final_state.get("answer", "")
             if answer:
                 print("\n" + "=" * 70)
                 print("[답변]")

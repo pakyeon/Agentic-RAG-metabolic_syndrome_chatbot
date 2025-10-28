@@ -1,39 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Agentic RAG 그래프 노드 함수들 (MessagesState 기반으로 전환)"""
+"""Agentic RAG 그래프 노드 함수들."""
 
 from __future__ import annotations
 
 import os
 from typing import Dict, List
 
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain.agents import create_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 
-from src.graph.state import AgenticRAGState
+from src.graph.state import RAGState
 from src.memory import get_graphiti_connector, get_short_term_store
 
 
-# === 헬퍼 함수 ===
-def _extract_question_from_messages(messages: List[BaseMessage]) -> str:
-    """메시지 리스트에서 마지막 사용자 질문 추출"""
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            return msg.content
-
-    return ""
-
-
-def _extract_last_ai_message(messages: List[BaseMessage]) -> str:
-    """메시지 리스트에서 마지막 AI 답변 추출"""
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage):
-            return msg.content
-
-    return ""
-
-
 # === 환자 컨텍스트 로드 ===
-def load_patient_context_node(state: AgenticRAGState) -> Dict:
+def load_patient_context_node(state: RAGState) -> Dict:
     """환자 정보를 로드하여 컨텍스트 생성."""
     patient_id = state.get("patient_id")
 
@@ -51,25 +33,16 @@ def load_patient_context_node(state: AgenticRAGState) -> Dict:
         if not context:
             return {
                 "patient_context": "",
-                "metadata": {
-                    **state.get("metadata", {}),
-                    "error": f"환자 ID '{patient_id}' 정보를 찾을 수 없습니다",
-                },
+                "error": f"환자 ID '{patient_id}' 정보를 찾을 수 없습니다",
             }
 
         return {"patient_context": context}
 
-    except Exception as exc:
-        return {
-            "patient_context": "",
-            "metadata": {
-                **state.get("metadata", {}),
-                "error": f"환자 정보 로드 실패: {exc}",
-            },
-        }
+    except Exception as exc:  # pragma: no cover - defensive path
+        return {"patient_context": "", "error": f"환자 정보 로드 실패: {exc}"}
 
 
-def load_memory_context_node(state: AgenticRAGState) -> Dict:
+def load_memory_context_node(state: RAGState) -> Dict:
     """SQLite 기반 단기 기억을 불러와 LangGraph 상태에 주입한다."""
     store = get_short_term_store()
     session_id = state.get("memory_session_id") or "default"
@@ -88,310 +61,488 @@ def load_memory_context_node(state: AgenticRAGState) -> Dict:
 
     return {
         "short_term_memory": segments,
-        "long_term_memory": [],
+        "long_term_memory": [],  # Graphiti는 도구 호출 시 사용
         "metadata": metadata,
     }
 
 
 # === Self-RAG [Retrieve] 토큰: 검색 필요성 판단 ===
-def should_retrieve_node(state: AgenticRAGState) -> Dict:
+def should_retrieve_node(state: RAGState) -> Dict:
     """검색이 필요한지 판단 (Self-RAG [Retrieve] 토큰)."""
-    question = _extract_question_from_messages(state["messages"])
-    patient_context = state.get("patient_context")
-    iteration = state.get("iteration", 0)
-
     try:
-        from src.evaluation import create_evaluator
+        from src.evaluation.self_rag_evaluator import SelfRAGEvaluator
 
-        evaluator = create_evaluator()
-        result = evaluator.evaluate_retrieve_need(
-            query=question, patient_context=patient_context
-        )
+        evaluator = SelfRAGEvaluator()
+        result = evaluator.evaluate_retrieve_need(state["question"])
 
-        metadata = dict(state.get("metadata", {}))
-        metadata["should_retrieve"] = result.should_retrieve == "yes"
-        metadata["retrieve_decision"] = result.should_retrieve
-        metadata["retrieve_difficulty"] = result.difficulty
-        metadata["retrieve_reason"] = result.reason
+        should_retrieve = result.should_retrieve == "yes"
+        documents_to_evaluate = result.documents_to_evaluate if should_retrieve else 0
 
         return {
-            "iteration": iteration + 1,
-            "metadata": metadata,
+            "should_retrieve": should_retrieve,
+            "iteration": state.get("iteration", 0) + 1,
+            "retrieve_difficulty": result.difficulty,
+            "evaluation_doc_limit": documents_to_evaluate,
+            "metadata": {
+                **state.get("metadata", {}),
+                "retrieve_decision": result.should_retrieve,
+                "retrieve_reason": result.reason,
+                "retrieve_difficulty": result.difficulty,
+                "retrieve_doc_limit": documents_to_evaluate,
+            },
         }
 
     except Exception as exc:
-        metadata = dict(state.get("metadata", {}))
-        metadata["should_retrieve"] = True
-        metadata["error"] = f"검색 필요성 판단 실패: {exc}"
-
         return {
-            "iteration": iteration + 1,
-            "metadata": metadata,
+            "should_retrieve": True,
+            "iteration": state.get("iteration", 0) + 1,
+            "error": f"검색 필요성 평가 실패: {exc}",
         }
 
 
-# === 내부 검색 ===
-def retrieve_internal_node(state: AgenticRAGState) -> Dict:
-    """내부 VectorDB에서 문서 검색."""
-    question = _extract_question_from_messages(state["messages"])
-    patient_context = state.get("patient_context")
-
+# === 내부 검색 (VectorDB Hybrid Search) ===
+def retrieve_internal_node(state: RAGState) -> Dict:
+    """VectorDB에서 관련 문서 검색."""
     try:
-        from src.data.vector_store import get_vector_store
+        from src.data.vector_store import get_cached_hybrid_retriever
+        from src.data.path_utils import (
+            DEFAULT_PERSIST_DIRECTORY,
+            DEFAULT_PARSED_DIRECTORY,
+            DEFAULT_RAW_DIRECTORY,
+        )
 
-        vector_store = get_vector_store()
+        retriever = get_cached_hybrid_retriever(
+            persist_directory=DEFAULT_PERSIST_DIRECTORY,
+            parsed_dir=DEFAULT_PARSED_DIRECTORY,
+            raw_dir=DEFAULT_RAW_DIRECTORY,
+        )
 
-        query = question
-        if patient_context:
-            query = f"{patient_context}\n\n{question}"
+        query = state["question"]
+        if state.get("patient_context"):
+            query = f"{state['patient_context']}\n\n질문: {state['question']}"
 
-        docs = vector_store.search(query, k=5)
+        docs = retriever.search(query, k=5)
 
         return {"internal_docs": docs}
 
     except Exception as exc:
-        metadata = dict(state.get("metadata", {}))
-        metadata["error"] = f"내부 검색 실패: {exc}"
-
-        return {"internal_docs": [], "metadata": metadata}
+        return {"internal_docs": [], "error": f"내부 검색 실패: {exc}"}
 
 
-# === 검색 품질 평가 ===
-def evaluate_retrieval_node(state: AgenticRAGState) -> Dict:
+# === Self-RAG ISREL: 검색 품질 평가 ===
+def evaluate_retrieval_node(state: RAGState) -> Dict:
     """검색된 문서의 관련성 평가 (Self-RAG ISREL)."""
-    question = _extract_question_from_messages(state["messages"])
-    internal_docs = state.get("internal_docs", [])
-
-    if not internal_docs:
-        metadata = dict(state.get("metadata", {}))
-        metadata["relevance_scores"] = []
-        return {"metadata": metadata}
-
     try:
-        from src.evaluation import create_evaluator
+        from src.evaluation.self_rag_evaluator import SelfRAGEvaluator
 
-        evaluator = create_evaluator()
-        evaluation = evaluator.assess_retrieval_quality(
-            query=question, documents=internal_docs, min_relevant_docs=2
-        )
+        evaluator = SelfRAGEvaluator()
+        docs = state.get("internal_docs", [])
 
-        relevance_scores = [
-            doc_eval.relevance.score for doc_eval in evaluation.document_evaluations
+        if not docs:
+            return {"relevance_scores": []}
+
+        scores = [
+            evaluator.evaluate_relevance(doc.page_content, state["question"])
+            for doc in docs
         ]
 
-        metadata = dict(state.get("metadata", {}))
-        metadata["relevance_scores"] = relevance_scores
-
-        return {"metadata": metadata}
+        return {"relevance_scores": scores}
 
     except Exception as exc:
-        metadata = dict(state.get("metadata", {}))
-        metadata["relevance_scores"] = []
-        metadata["error"] = f"검색 품질 평가 실패: {exc}"
-
-        return {"metadata": metadata}
+        return {"relevance_scores": [], "error": f"검색 품질 평가 실패: {exc}"}
 
 
-# === CRAG 액션 결정 ===
-def decide_crag_action_node(state: AgenticRAGState) -> Dict:
-    """CRAG 액션 결정 (CORRECT/INCORRECT/AMBIGUOUS)."""
-    question = _extract_question_from_messages(state["messages"])
-    internal_docs = state.get("internal_docs", [])
-    relevance_scores = state.get("metadata", {}).get("relevance_scores", [])
-
+# === CRAG: 액션 결정 ===
+def decide_crag_action_node(state: RAGState) -> Dict:
+    """CRAG 전략에 따른 액션 결정."""
     try:
-        from src.strategies import create_corrective_rag
+        from src.strategies.corrective_rag import CorrectiveRAG
 
-        crag = create_corrective_rag()
-        result = crag.decide_action(
-            query=question, documents=internal_docs, relevance_scores=relevance_scores
+        strategy = CorrectiveRAG()
+        docs = state.get("internal_docs", [])
+
+        if not docs:
+            return {"crag_action": "incorrect", "crag_confidence": 0.0}
+
+        action, _ = strategy.decide_action(
+            query=state["question"],
+            documents=docs,
+            documents_to_evaluate=state.get("evaluation_doc_limit") or None,
         )
 
-        metadata = dict(state.get("metadata", {}))
-        metadata["crag_action"] = result.action.value.lower()
-        metadata["crag_confidence"] = result.confidence
-        metadata["crag_reason"] = result.reason
-
-        return {"metadata": metadata}
+        return {"crag_action": action.value, "crag_confidence": 1.0}
 
     except Exception as exc:
-        metadata = dict(state.get("metadata", {}))
-        metadata["crag_action"] = "correct"
-        metadata["crag_confidence"] = 0.5
-        metadata["error"] = f"CRAG 액션 결정 실패: {exc}"
+        return {
+            "crag_action": "correct",
+            "crag_confidence": 0.0,
+            "error": f"CRAG 액션 결정 실패: {exc}",
+        }
 
-        return {"metadata": metadata}
 
+# === Task 5.4: 외부 검색 및 컨텍스트 병합 ===
+def search_external_node(state: RAGState) -> Dict:
+    """
+    Tavily 외부 검색 노드 (Task 5.4).
 
-# === 외부 검색 ===
-def search_external_node(state: AgenticRAGState) -> Dict:
-    """Tavily를 사용한 외부 웹 검색."""
-    question = _extract_question_from_messages(state["messages"])
-
+    CRAG 액션이 'incorrect' 또는 'ambiguous'일 때만 실행된다.
+    """
     try:
-        from src.tools.tavily import get_default_tool
-
-        tool = get_default_tool()
-        results = tool.invoke({"query": question})
-
+        from src.tools.tavily import get_tavily_tool
         from langchain_core.documents import Document
 
-        if isinstance(results, str):
-            external_docs = [
-                Document(page_content=results, metadata={"source": "tavily"})
-            ]
-        elif isinstance(results, list):
-            external_docs = [
-                Document(
-                    page_content=item.get("content", ""),
-                    metadata={"source": "tavily", "url": item.get("url", "")},
+        action = state.get("crag_action", "")
+
+        if action == "correct":
+            return {"external_docs": []}
+
+        if action not in ["incorrect", "ambiguous"]:
+            return {"external_docs": []}
+
+        tavily_tool = get_tavily_tool(max_results=3)
+        query = state["question"]
+
+        result = tavily_tool.invoke({"query": query})
+
+        external_docs: List[Document] = []
+        if isinstance(result, dict):
+            for i, item in enumerate(result.get("results", [])):
+                content = item.get("content", "")
+                url = item.get("url", "")
+                title = item.get("title", f"Web Result {i+1}")
+                score = item.get("score", 0.0)
+
+                if content.strip():
+                    doc = Document(
+                        page_content=content,
+                        metadata={
+                            "source": "tavily_web_search",
+                            "url": url,
+                            "title": title,
+                            "query": query,
+                            "rank": i + 1,
+                            "score": score,
+                        },
+                    )
+                    external_docs.append(doc)
+        elif isinstance(result, str):
+            if result.strip():
+                doc = Document(
+                    page_content=result,
+                    metadata={"source": "tavily_web_search", "query": query},
                 )
-                for item in results
-            ]
-        else:
-            external_docs = []
+                external_docs.append(doc)
+        elif isinstance(result, list):
+            for i, item in enumerate(result):
+                if isinstance(item, dict):
+                    content = item.get("content", str(item))
+                    url = item.get("url", "")
+                    title = item.get("title", f"Web Result {i+1}")
+
+                    doc = Document(
+                        page_content=content,
+                        metadata={
+                            "source": "tavily_web_search",
+                            "url": url,
+                            "title": title,
+                            "query": query,
+                            "rank": i + 1,
+                        },
+                    )
+                    external_docs.append(doc)
+                else:
+                    doc = Document(
+                        page_content=str(item),
+                        metadata={
+                            "source": "tavily_web_search",
+                            "query": query,
+                            "rank": i + 1,
+                        },
+                    )
+                    external_docs.append(doc)
 
         return {"external_docs": external_docs}
 
     except Exception as exc:
-        metadata = dict(state.get("metadata", {}))
-        metadata["error"] = f"외부 검색 실패: {exc}"
+        import traceback
 
-        return {"external_docs": [], "metadata": metadata}
-
-
-# === 컨텍스트 병합 ===
-def merge_context_node(state: AgenticRAGState) -> Dict:
-    """CRAG 액션에 따라 컨텍스트 병합 후 SystemMessage로 추가."""
-    crag_action = state.get("metadata", {}).get("crag_action", "correct")
-    internal_docs = state.get("internal_docs", [])
-    external_docs = state.get("external_docs", [])
-
-    merged_parts = []
-
-    if crag_action == "correct":
-        # CORRECT: 내부 문서만 사용
-        for i, doc in enumerate(internal_docs, 1):
-            source = doc.metadata.get("basename", doc.metadata.get("source", "unknown"))
-            merged_parts.append(f"[내부 문서 {i}] (출처: {source})\n{doc.page_content}")
-
-    elif crag_action == "incorrect":
-        # INCORRECT: 외부 문서로 완전 대체
-        for i, doc in enumerate(external_docs, 1):
-            source = doc.metadata.get("url", doc.metadata.get("source", "unknown"))
-            merged_parts.append(f"[외부 문서 {i}] (출처: {source})\n{doc.page_content}")
-
-    else:  # ambiguous
-        # AMBIGUOUS: 내부+외부 혼합
-        relevant_internal = [
-            doc
-            for i, doc in enumerate(internal_docs)
-            if i < len(state.get("metadata", {}).get("relevance_scores", []))
-            and state.get("metadata", {}).get("relevance_scores", [])[i] >= 3.0
-        ]
-
-        for i, doc in enumerate(relevant_internal, 1):
-            source = doc.metadata.get("basename", doc.metadata.get("source", "unknown"))
-            merged_parts.append(f"[내부 문서 {i}] (출처: {source})\n{doc.page_content}")
-
-        for i, doc in enumerate(external_docs, 1):
-            source = doc.metadata.get("url", doc.metadata.get("source", "unknown"))
-            merged_parts.append(f"[외부 문서 {i}] (출처: {source})\n{doc.page_content}")
-
-    merged_context = "\n\n".join(merged_parts)
-
-    # 병합된 컨텍스트를 SystemMessage로 추가
-    if merged_context:
-        context_msg = SystemMessage(content=f"[검색 컨텍스트]\n\n{merged_context}")
-
-        metadata = dict(state.get("metadata", {}))
-        metadata["context_added"] = True
-
-        return {"messages": [context_msg], "metadata": metadata}
-
-    metadata = dict(state.get("metadata", {}))
-    metadata["context_added"] = False
-
-    return {"metadata": metadata}
+        error_msg = f"외부 검색 실패: {exc}\n{traceback.format_exc()}"
+        return {"external_docs": [], "error": error_msg}
 
 
-# === 답변 생성 ===
-def generate_answer_node(state: AgenticRAGState) -> Dict:
-    """최종 답변 생성 (AIMessage로 반환)."""
+def merge_context_node(state: RAGState) -> Dict:
+    """
+    내부 + 외부 문서 병합 노드 (Task 5.4).
+
+    CRAG 액션에 따라 다른 병합 전략을 적용한다.
+    """
     try:
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        action = state.get("crag_action", "correct")
+        internal_docs = state.get("internal_docs", [])
+        external_docs = state.get("external_docs", [])
+        relevance_scores = state.get("relevance_scores", [])
 
-        # messages를 그대로 LLM에 전달
-        response = llm.invoke(state["messages"])
+        final_docs = []
 
-        return {
-            "messages": [response],
-        }
+        if action == "correct":
+            final_docs = internal_docs
+        elif action == "incorrect":
+            final_docs = external_docs
+        else:
+            relevant_internal = []
+            for i, doc in enumerate(internal_docs):
+                if i < len(relevance_scores):
+                    score = relevance_scores[i]
+                    if hasattr(score, "relevance"):
+                        if score.relevance == "relevant":
+                            relevant_internal.append(doc)
+                    elif isinstance(score, (int, float)) and score >= 3.0:
+                        relevant_internal.append(doc)
+
+            final_docs = relevant_internal + external_docs
+
+            seen_contents = set()
+            unique_docs = []
+
+            for doc in final_docs:
+                normalized = doc.page_content.strip().lower()[:200]
+                if normalized not in seen_contents:
+                    seen_contents.add(normalized)
+                    unique_docs.append(doc)
+
+            final_docs = unique_docs
+
+        context_parts = []
+        for i, doc in enumerate(final_docs, 1):
+            source = doc.metadata.get("source", "N/A")
+            title = doc.metadata.get("title", "")
+            basename = doc.metadata.get("basename", "")
+
+            if source == "tavily_web_search":
+                header = f"[외부 문서 {i}] {title}"
+            else:
+                header = f"[내부 문서 {i}] {basename or 'N/A'}"
+
+            context_parts.append(f"{header}\n{doc.page_content}")
+
+        merged_context = "\n\n".join(context_parts)
+
+        return {"merged_context": merged_context}
 
     except Exception as exc:
-        # 에러 발생 시 에러 메시지를 AIMessage로 반환
-        error_msg = AIMessage(content=f"답변 생성 중 오류가 발생했습니다: {exc}")
-
-        metadata = dict(state.get("metadata", {}))
-        metadata["error"] = f"답변 생성 실패: {exc}"
-
-        return {"messages": [error_msg], "metadata": metadata}
+        return {"merged_context": "", "error": f"컨텍스트 병합 실패: {exc}"}
 
 
-# === 답변 품질 평가 ===
-def evaluate_answer_node(state: AgenticRAGState) -> Dict:
-    """답변 품질 평가 (Self-RAG ISSUP/ISUSE)."""
-    question = _extract_question_from_messages(state["messages"])
-    answer = _extract_last_ai_message(state["messages"])
-    internal_docs = state.get("internal_docs", [])
-    iteration = state.get("iteration", 0)
-    max_iterations = state.get("max_iterations", 2)
+def generate_answer_node(state: RAGState) -> Dict:
+    """
+    LLM으로 최종 답변 생성 노드 (Task 5.5 + Task 6.2).
 
-    if not answer:
-        metadata = dict(state.get("metadata", {}))
-        metadata["support_score"] = 0.0
-        metadata["usefulness_score"] = 0.0
-        metadata["needs_regeneration"] = False
-        return {"metadata": metadata}
-
+    단기 기억은 최근 3턴 원문 + 요약으로 구성되고,
+    장기 기억은 Graphiti MCP 도구 호출을 통해 필요 시 사용된다.
+    """
     try:
-        from src.evaluation import create_evaluator
+        session_id = state.get("memory_session_id") or "default"
+        question = state["question"]
+        merged_context = state.get("merged_context", "")
+        patient_context = state.get("patient_context", "")
+        short_term_memory = state.get("short_term_memory", [])
+
+        connector = get_graphiti_connector()
+        graphiti_tools = (
+            connector.build_tools(session_id) if connector.is_enabled else []
+        )
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY가 설정되지 않아 답변을 생성할 수 없습니다."
+            )
+
+        llm = ChatOpenAI(
+            model="gpt-5-mini",
+            temperature=0.3,
+            reasoning_effort="minimal",
+            api_key=api_key,
+        )
+
+        system_prompt = """당신은 대사증후군 상담사를 어시스턴트하는 전문 AI입니다.
+
+**역할:**
+- 상담사가 환자 상담 시 필요한 전문 정보와 가이드라인 제공
+- 대사증후군 관련 진단, 치료, 예방, 관리에 대한 근거 있는 정보 제공
+- 생활습관 개선(식단, 운동, 금연, 스트레스 관리 등)에 대한 구체적 조언
+
+**도구 사용 지침:**
+- 장기 기억이 필요하면 `graphiti_search_memories` 도구를 호출하여 관련 정보를 탐색하세요.
+- 답변 후에는 동일한 대화를 `graphiti_upsert_memory`로 저장해 향후 상담에 활용하세요.
+
+**답변 원칙:**
+1. 제공된 컨텍스트를 바탕으로 정확하고 근거 있는 답변
+2. 상담사가 환자에게 설명하기 쉽도록 명확하고 구조화된 정보 제공
+3. 환자 정보가 있으면 개인 맞춤형 조언 제시
+4. 의학 용어 사용 시 간단한 설명 추가
+5. 필요 시 추가 검사나 전문의 상담 권장 사항 포함"""
+
+        context_segments: List[str] = []
+        if patient_context:
+            context_segments.append(f"**환자 정보:**\n{patient_context}")
+        if short_term_memory:
+            context_segments.append(
+                "**단기 기억:**\n"
+                + "\n\n".join(str(item) for item in short_term_memory)
+            )
+        if merged_context:
+            context_segments.append(f"**참고 자료:**\n{merged_context}")
+
+        context_payload = (
+            "\n\n".join(context_segments) if context_segments else "컨텍스트 없음"
+        )
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                ("system", "{context}"),
+                ("human", "{question}"),
+                MessagesPlaceholder("agent_scratchpad"),
+            ]
+        )
+
+        if graphiti_tools:
+            agent = create_agent(llm, graphiti_tools, prompt)
+            response = agent.invoke(
+                {
+                    "context": context_payload,
+                    "question": question,
+                }
+            )
+            answer = response.get("output", "")
+        else:
+            messages = prompt.format_messages(
+                context=context_payload,
+                question=question,
+                agent_scratchpad=[],
+            )
+            answer = llm.invoke(messages).content
+
+        return {"answer": answer}
+
+    except Exception as exc:
+        import traceback
+
+        error_msg = f"답변 생성 실패: {exc}\n{traceback.format_exc()}"
+        return {
+            "answer": "죄송합니다. 답변 생성 중 오류가 발생했습니다.",
+            "error": error_msg,
+        }
+
+
+def evaluate_answer_node(state: RAGState) -> Dict:
+    """
+    Self-RAG 답변 평가 노드 (Task 5.5).
+
+    ISSUP (지원도)와 ISUSE (유용성)를 평가하여 답변 품질을 판단하고,
+    평가 결과를 단기 기억 저장소에 기록한다.
+    """
+    try:
+        from src.evaluation.self_rag_evaluator import create_evaluator
+
+        question = state["question"]
+        answer = state.get("answer", "")
+        merged_context = state.get("merged_context", "")
+        iteration = state.get("iteration", 1)
+        max_iterations = state.get("max_iterations", 2)
+
+        if not answer or not merged_context:
+            return {
+                "support_score": 0.0,
+                "usefulness_score": 0.0,
+                "needs_regeneration": True,
+                "short_term_memory": state.get("short_term_memory", []),
+            }
 
         evaluator = create_evaluator()
 
-        # ISSUP: 답변 지원도 평가
-        support_result = evaluator.evaluate_support(
-            query=question, documents=internal_docs, answer=answer
+        context_parts = merged_context.split("\n\n")
+        documents = []
+        for part in context_parts:
+            lines = part.split("\n", 1)
+            if len(lines) > 1:
+                documents.append(lines[1])
+            else:
+                documents.append(part)
+
+        documents = [doc for doc in documents if doc.strip()]
+
+        if not documents:
+            return {
+                "support_score": 0.0,
+                "usefulness_score": 0.0,
+                "needs_regeneration": True,
+            }
+
+        answer_quality = evaluator.assess_answer_quality(
+            query=question,
+            answer=answer,
+            documents=documents,
         )
 
-        # ISUSE: 답변 유용성 평가
-        usefulness_result = evaluator.evaluate_usefulness(query=question, answer=answer)
+        support_results = answer_quality["support_results"]
+        usefulness_result = answer_quality["usefulness"]
 
-        support_score = support_result.score
-        usefulness_score = usefulness_result.score
+        support_score = 0.0
+        if support_results:
+            support_scores = []
+            for item in support_results:
+                if item.support == "fully_supported":
+                    support_scores.append(5.0)
+                elif item.support == "partially_supported":
+                    support_scores.append(3.0)
+                else:
+                    support_scores.append(1.0)
+            support_score = sum(support_scores) / len(support_scores)
 
-        # 재생성 필요 여부 판단
-        needs_regeneration = (
+        usefulness_score = float(usefulness_result.score)
+
+        needs_regeneration = False
+        if (
             support_score < 3.0 or usefulness_score < 3.0
-        ) and iteration < max_iterations
+        ) and iteration < max_iterations:
+            needs_regeneration = True
 
-        metadata = dict(state.get("metadata", {}))
-        metadata["support_score"] = support_score
-        metadata["usefulness_score"] = usefulness_score
-        metadata["needs_regeneration"] = needs_regeneration
-
-        # 단기 기억에 저장
-        store = get_short_term_store()
         session_id = state.get("memory_session_id") or "default"
-        store.add_turn(session_id, question, answer)
+        store = get_short_term_store()
+        store.record_interaction(
+            session_id=session_id,
+            question=question,
+            answer=answer,
+            metadata={
+                "support_score": support_score,
+                "usefulness_score": usefulness_score,
+                "iteration": iteration,
+                "patient_id": state.get("patient_id"),
+            },
+        )
+        updated_context = store.get_context(session_id)
+        short_term_segments: List[str] = []
+        short_term_segments.extend(updated_context.recent)
+        if updated_context.history_summary:
+            short_term_segments.append(updated_context.history_summary)
+        short_term_segments.extend(updated_context.topic_summaries)
 
-        return {"metadata": metadata}
+        return {
+            "support_score": support_score,
+            "usefulness_score": usefulness_score,
+            "needs_regeneration": needs_regeneration,
+            "short_term_memory": short_term_segments,
+        }
 
     except Exception as exc:
-        metadata = dict(state.get("metadata", {}))
-        metadata["support_score"] = 3.0
-        metadata["usefulness_score"] = 3.0
-        metadata["needs_regeneration"] = False
-        metadata["error"] = f"답변 품질 평가 실패: {exc}"
+        import traceback
 
-        return {"metadata": metadata}
+        error_msg = f"답변 평가 실패: {exc}\n{traceback.format_exc()}"
+        return {
+            "support_score": 0.0,
+            "usefulness_score": 0.0,
+            "needs_regeneration": False,
+            "error": error_msg,
+        }

@@ -1,25 +1,21 @@
 # -*- coding: utf-8 -*-
 """Agentic RAG 그래프 상태 정의"""
 
-from typing import TypedDict, List, Optional, Dict, Any, Annotated
+from typing import TypedDict, List, Optional, Dict, Any
 from langchain_core.documents import Document
-from langchain_core.messages import BaseMessage
-from langgraph.graph.message import add_messages
 
 
-class AgenticRAGState(TypedDict):
-    """
-    Agentic RAG를 위한 메시지 기반 상태
+class RAGState(TypedDict):
+    """Agentic RAG 그래프 상태
 
-    기존 RAGState를 MessagesState 패턴으로 전환
-    Self-RAG + CRAG 기법 유지, 상태 관리만 메시지 기반으로 변경
+    Self-RAG + CRAG 기법이 적용된 Agentic RAG 시스템의 상태를 관리합니다.
     """
 
-    # 메시지 히스토리 (핵심: 질문, 답변, 컨텍스트 모두 메시지로 관리)
-    messages: Annotated[List[BaseMessage], add_messages]
+    # 입력
+    question: str
+    patient_id: Optional[int]
 
     # 환자 정보
-    patient_id: Optional[int]
     patient_context: Optional[str]
 
     # 메모리
@@ -27,13 +23,29 @@ class AgenticRAGState(TypedDict):
     long_term_memory: List[str]
     memory_session_id: Optional[str]
 
+    # Self-RAG Reflection Tokens
+    should_retrieve: bool  # [Retrieve] 토큰
+    relevance_scores: List[float]  # ISREL: 문서 관련성 (1-5)
+    support_score: float  # ISSUP: 답변 지원도 (1-5)
+    usefulness_score: float  # ISUSE: 답변 유용성 (1-5)
+
+    # CRAG Strategy
+    crag_action: str  # correct/incorrect/ambiguous
+    crag_confidence: float  # 0-1
+
     # 검색 결과
-    internal_docs: List[Document]
-    external_docs: List[Document]
+    internal_docs: List[Document]  # VectorDB 검색
+    external_docs: List[Document]  # Tavily 외부 검색
+    merged_context: str  # 최종 컨텍스트
+
+    # 답변
+    answer: str
 
     # 제어
     iteration: int
     max_iterations: int
+    needs_regeneration: bool
 
-    # 메타데이터 (평가 점수, 액션, 에러 등)
+    # 메타
+    error: Optional[str]
     metadata: Dict[str, Any]
