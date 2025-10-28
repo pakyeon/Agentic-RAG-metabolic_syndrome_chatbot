@@ -18,6 +18,28 @@ def test_internal_retriever_tool():
 
     try:
         from src.tools import internal_retriever_tool
+        from src.data.vector_store import DEFAULT_PERSIST_DIRECTORY
+        from pathlib import Path
+
+        # VectorDB 존재 확인 및 자동 구축
+        # path_utils에서 올바른 경로 사용
+        from src.data.path_utils import (
+            DEFAULT_PERSIST_DIRECTORY as PERSIST_DIR,
+            DEFAULT_PARSED_DIRECTORY as PARSED_DIR,
+        )
+
+        if not Path(PERSIST_DIR).exists():
+            print("⚠️  VectorDB가 없습니다. 자동으로 구축합니다...")
+            print("(최초 1회만 실행되며, 1-2분 소요됩니다)\n")
+
+            from src.data.vector_store import build_vector_db
+
+            build_vector_db(
+                parsed_dir=str(PARSED_DIR),
+                persist_directory=str(PERSIST_DIR),
+                force_rebuild=False,
+            )
+            print("\n✓ VectorDB 구축 완료!\n")
 
         # Tool 기본 정보 확인
         print(f"✓ Tool 이름: {internal_retriever_tool.name}")

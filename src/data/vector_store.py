@@ -21,8 +21,8 @@ from src.data.document_loader import MetabolicSyndromeChunker
 from src.data.path_utils import project_path
 
 # 기본 경로 설정
-DEFAULT_RAW_DIRECTORY = project_path("data/raw")
-DEFAULT_PARSED_DIRECTORY = project_path("data/parsed")
+DEFAULT_RAW_DIRECTORY = project_path("metabolic_syndrome_data/raw")
+DEFAULT_PARSED_DIRECTORY = project_path("metabolic_syndrome_data/parsed")
 DEFAULT_PERSIST_DIRECTORY = project_path("data/chroma_db")
 _HYBRID_RETRIEVER_CACHE: "HybridRetriever | None" = None
 _HYBRID_RETRIEVER_LOCK = Lock()

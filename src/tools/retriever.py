@@ -23,7 +23,18 @@ def internal_retriever_tool(query: str, k: int = 5) -> str:
     """
     from src.data.vector_store import get_cached_hybrid_retriever
 
-    retriever = get_cached_hybrid_retriever()
+    # path_utils의 올바른 경로 사용
+    from src.data.path_utils import (
+        DEFAULT_PERSIST_DIRECTORY,
+        DEFAULT_PARSED_DIRECTORY,
+        DEFAULT_RAW_DIRECTORY,
+    )
+
+    retriever = get_cached_hybrid_retriever(
+        persist_directory=DEFAULT_PERSIST_DIRECTORY,
+        parsed_dir=DEFAULT_PARSED_DIRECTORY,
+        raw_dir=DEFAULT_RAW_DIRECTORY,
+    )
     docs = retriever.search(query, k=k)
 
     if not docs:
