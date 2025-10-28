@@ -9,8 +9,9 @@ from typing import Dict, Any, Literal, List
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
+from langchain_core.messages import HumanMessage
 
-from src.graph.state import RAGState
+from src.graph.state import AgenticRAGState
 from src.graph.nodes import (
     load_patient_context_node,
     load_memory_context_node,
@@ -39,47 +40,34 @@ def _get_checkpointer() -> SqliteSaver:
 
 
 # === Task 6.2: Self-RAG 조건부 엣지 ===
-
-
-def route_retrieve(state: RAGState) -> Literal["retrieve_internal", "generate_answer"]:
+def route_retrieve(
+    state: AgenticRAGState,
+) -> Literal["retrieve_internal", "generate_answer"]:
     """
     Self-RAG [Retrieve] 토큰 기반 분기
 
-    - should_retrieve=True → 내부 검색 수행
-    - should_retrieve=False → 검색 스킵하고 직접 답변
-
-    Args:
-        state: 현재 그래프 상태
-
-    Returns:
-        다음 노드 이름
+    metadata에서 should_retrieve 확인
     """
-    if state.get("should_retrieve", True):
+    should_retrieve = state.get("metadata", {}).get("should_retrieve", True)
+
+    if should_retrieve:
         return "retrieve_internal"
     else:
         return "generate_answer"
 
 
 # === Task 6.3: CRAG 조건부 엣지 ===
-
-
-def route_crag_action(state: RAGState) -> Literal["search_external", "merge_context"]:
+def route_crag_action(
+    state: AgenticRAGState,
+) -> Literal["search_external", "merge_context"]:
     """
     CRAG 액션에 따른 분기
 
-    - CORRECT: 내부 문서만 사용 → 외부 검색 스킵 → merge_context
-    - INCORRECT: 외부 검색으로 교체 → search_external → merge_context
-    - AMBIGUOUS: 내부+외부 병합 → search_external → merge_context
-
-    Args:
-        state: 현재 그래프 상태
-
-    Returns:
-        다음 노드 이름
+    metadata에서 crag_action 확인
     """
-    action = state.get("crag_action", "correct").lower()
+    crag_action = state.get("metadata", {}).get("crag_action", "correct").lower()
 
-    if action == "correct":
+    if crag_action == "correct":
         # CORRECT: 내부 문서 품질 충분 → 외부 검색 스킵
         return "merge_context"
     else:
@@ -88,22 +76,15 @@ def route_crag_action(state: RAGState) -> Literal["search_external", "merge_cont
 
 
 # === Task 6.4: Self-RAG 재생성 루프 ===
-
-
-def route_regeneration(state: RAGState) -> Literal["retrieve_internal", "__end__"]:
+def route_regeneration(
+    state: AgenticRAGState,
+) -> Literal["retrieve_internal", "__end__"]:
     """
     Self-RAG 답변 품질 평가 후 재생성 판단
 
-    - needs_regeneration=True AND iteration < max_iterations → 재검색
-    - 아니면 → END
-
-    Args:
-        state: 현재 그래프 상태
-
-    Returns:
-        다음 노드 이름 또는 "__end__"
+    metadata에서 needs_regeneration 확인
     """
-    needs_regen = state.get("needs_regeneration", False)
+    needs_regen = state.get("metadata", {}).get("needs_regeneration", False)
     iteration = state.get("iteration", 0)
     max_iterations = state.get("max_iterations", 2)
 
@@ -117,7 +98,7 @@ def route_regeneration(state: RAGState) -> Literal["retrieve_internal", "__end__
 
 def build_rag_graph():
     """
-    Self-CRAG 기반 Agentic RAG 그래프 생성
+    Self-CRAG 기반 Agentic RAG 그래프 생성 (MessagesState 기반)
 
     Task 6.1: 기본 순차 연결
     Task 6.2: Self-RAG [Retrieve] 조건부 엣지 추가
@@ -127,10 +108,10 @@ def build_rag_graph():
     Returns:
         CompiledGraph: 컴파일된 LangGraph
     """
-    # StateGraph 생성
-    workflow = StateGraph(RAGState)
+    # StateGraph 생성 (AgenticRAGState 사용)
+    workflow = StateGraph(AgenticRAGState)
 
-    # 노드 추가 (9개)
+    # 노드 추가 (10개)
     workflow.add_node("load_patient_context", load_patient_context_node)
     workflow.add_node("load_memory_context", load_memory_context_node)
     workflow.add_node("should_retrieve", should_retrieve_node)
@@ -202,9 +183,9 @@ def create_initial_state(
     *,
     session_id: str | None = None,
     short_term: List[str] | None = None,
-) -> RAGState:
+) -> AgenticRAGState:
     """
-    초기 상태 생성 헬퍼 함수
+    초기 상태 생성 (MessagesState 기반)
 
     Args:
         question: 사용자 질문
@@ -213,29 +194,22 @@ def create_initial_state(
         short_term: 이전 턴의 단기 기억(선택)
 
     Returns:
-        RAGState: 초기화된 상태
+        AgenticRAGState: 초기화된 상태
     """
+    # 질문을 HumanMessage로 변환
+    messages = [HumanMessage(content=question)]
+
     return {
-        "question": question,
+        "messages": messages,
         "patient_id": patient_id,
         "patient_context": None,
         "short_term_memory": list(short_term or []),
         "long_term_memory": [],
         "memory_session_id": session_id,
-        "should_retrieve": False,
-        "relevance_scores": [],
-        "support_score": 0.0,
-        "usefulness_score": 0.0,
-        "crag_action": "",
-        "crag_confidence": 0.0,
         "internal_docs": [],
         "external_docs": [],
-        "merged_context": "",
-        "answer": "",
         "iteration": 0,
         "max_iterations": 2,
-        "needs_regeneration": False,
-        "error": None,
         "metadata": {},
     }
 

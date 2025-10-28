@@ -10,20 +10,25 @@ import os
 import pytest
 
 if not os.getenv("OPENAI_API_KEY"):
-    pytest.skip("OpenAI API 키가 없어 통합 워크플로우 테스트를 건너뜁니다.", allow_module_level=True)
+    pytest.skip(
+        "OpenAI API 키가 없어 통합 워크플로우 테스트를 건너뜁니다.",
+        allow_module_level=True,
+    )
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+def extract_answer_from_messages(messages):
+    """메시지에서 마지막 AI 답변 추출"""
+    for msg in reversed(messages):
+        if msg.type == "ai":
+            return msg.content
+    return ""
 
 
 def test_scenario_1_basic():
     """
     시나리오 1: 일반 질문 (검색 → CORRECT → 답변)
-
-    통합 노드:
-    - Task 5.2: 환자 컨텍스트 로드 (없음) + 검색 필요성 판단
-    - Task 5.3: 내부 검색 + ISREL 평가 + CRAG 액션
-    - Task 5.4: 컨텍스트 병합 (CORRECT이므로 외부 검색 스킵 예상)
-    - Task 5.5: 답변 생성 + ISSUP/ISUSE 평가
     """
     print("\n" + "=" * 70)
     print("시나리오 1: 일반 질문 (검색 → CORRECT → 답변)")
@@ -40,7 +45,8 @@ def test_scenario_1_basic():
         # === Task 5.2 검증: 환자 컨텍스트 + 검색 필요성 ===
         print("\n[Task 5.2 검증]")
         patient_context = final_state.get("patient_context")
-        should_retrieve = final_state.get("should_retrieve")
+        metadata = final_state.get("metadata", {})
+        should_retrieve = metadata.get("should_retrieve", False)
         print(f"  환자 컨텍스트: {'없음' if not patient_context else '있음'}")
         print(f"  검색 필요: {should_retrieve}")
         assert should_retrieve == True, "검색이 필요해야 함"
@@ -48,8 +54,8 @@ def test_scenario_1_basic():
         # === Task 5.3 검증: 내부 검색 + ISREL + CRAG ===
         print("\n[Task 5.3 검증]")
         internal_docs = final_state.get("internal_docs", [])
-        relevance_scores = final_state.get("relevance_scores", [])
-        crag_action = final_state.get("crag_action", "")
+        relevance_scores = metadata.get("relevance_scores", [])
+        crag_action = metadata.get("crag_action", "")
         print(f"  내부 검색 문서 수: {len(internal_docs)}")
         print(f"  ISREL 평가 수: {len(relevance_scores)}")
         print(f"  CRAG 액션: {crag_action}")
@@ -58,17 +64,18 @@ def test_scenario_1_basic():
         # === Task 5.4 검증: 외부 검색 + 컨텍스트 병합 ===
         print("\n[Task 5.4 검증]")
         external_docs = final_state.get("external_docs", [])
-        merged_context = final_state.get("merged_context", "")
+        context_added = metadata.get("context_added", False)
         print(f"  외부 검색 문서 수: {len(external_docs)}")
-        print(f"  병합된 컨텍스트 길이: {len(merged_context)} 문자")
-        assert len(merged_context) > 0, "병합된 컨텍스트가 있어야 함"
+        print(f"  컨텍스트 추가: {context_added}")
+        assert context_added, "컨텍스트가 추가되어야 함"
 
         # === Task 5.5 검증: 답변 생성 + ISSUP/ISUSE ===
         print("\n[Task 5.5 검증]")
-        answer = final_state.get("answer", "")
-        support_score = final_state.get("support_score", 0.0)
-        usefulness_score = final_state.get("usefulness_score", 0.0)
-        needs_regeneration = final_state.get("needs_regeneration", False)
+        messages = final_state.get("messages", [])
+        answer = extract_answer_from_messages(messages)
+        support_score = metadata.get("support_score", 0.0)
+        usefulness_score = metadata.get("usefulness_score", 0.0)
+        needs_regeneration = metadata.get("needs_regeneration", False)
         print(f"  답변 길이: {len(answer)} 문자")
         print(f"  ISSUP (지원도): {support_score}/5.0")
         print(f"  ISUSE (유용성): {usefulness_score}/5.0")
@@ -90,11 +97,6 @@ def test_scenario_1_basic():
 def test_scenario_2_patient():
     """
     시나리오 2: 환자별 질문 (환자 컨텍스트 포함)
-
-    통합 노드:
-    - Task 5.2: 환자 컨텍스트 로드 (있음) + 검색 필요성 판단
-    - Task 5.3: 내부 검색 (환자 컨텍스트 포함 쿼리)
-    - Task 5.5: 답변 생성 (환자별 맞춤)
     """
     print("\n" + "=" * 70)
     print("시나리오 2: 환자별 질문 (환자 컨텍스트 포함)")
@@ -113,7 +115,8 @@ def test_scenario_2_patient():
         # === Task 5.2 검증: 환자 컨텍스트 ===
         print("\n[Task 5.2 검증]")
         patient_context = final_state.get("patient_context")
-        should_retrieve = final_state.get("should_retrieve")
+        metadata = final_state.get("metadata", {})
+        should_retrieve = metadata.get("should_retrieve", False)
         print(f"  환자 컨텍스트: {'있음' if patient_context else '없음'}")
         if patient_context:
             print(f"  컨텍스트 길이: {len(patient_context)} 문자")
@@ -127,7 +130,8 @@ def test_scenario_2_patient():
 
         # === Task 5.5 검증: 환자별 맞춤 답변 ===
         print("\n[Task 5.5 검증]")
-        answer = final_state.get("answer", "")
+        messages = final_state.get("messages", [])
+        answer = extract_answer_from_messages(messages)
         print(f"  답변 길이: {len(answer)} 문자")
         assert len(answer) > 0, "답변이 생성되어야 함"
 
