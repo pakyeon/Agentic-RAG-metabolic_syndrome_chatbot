@@ -61,9 +61,42 @@ def load_memory_context_node(state: RAGState) -> Dict:
     metadata["memory_history_summary"] = bool(context.history_summary)
     metadata["memory_topic_summaries"] = len(context.topic_summaries)
 
+    long_term_segments: List[str] = []
+    graphiti_meta: Dict[str, Any] = {
+        "enabled": False,
+        "memory_count": 0,
+    }
+
+    try:
+        connector = get_graphiti_connector()
+        graphiti_meta["enabled"] = connector.is_enabled
+
+        if connector.is_enabled:
+            search_result = connector.search_memories_sync(
+                session_id=session_id,
+                query=state.get("question", ""),
+                limit=None,
+            )
+            long_term_segments = list(search_result.get("memories", []) or [])
+            diagnostics = search_result.get("diagnostics")
+
+            if diagnostics:
+                if isinstance(diagnostics, dict):
+                    graphiti_meta["diagnostics"] = {
+                        key: str(value) for key, value in diagnostics.items()
+                    }
+                else:
+                    graphiti_meta["diagnostics"] = str(diagnostics)
+
+    except Exception as exc:  # pragma: no cover - defensive path
+        graphiti_meta["error"] = str(exc)
+
+    graphiti_meta["memory_count"] = len(long_term_segments)
+    metadata["graphiti"] = graphiti_meta
+
     return {
         "short_term_memory": segments,
-        "long_term_memory": [],  # Graphiti는 도구 호출 시 사용
+        "long_term_memory": long_term_segments,
         "metadata": metadata,
     }
 
@@ -544,6 +577,7 @@ def generate_answer_node(state: RAGState) -> Dict:
         merged_context = state.get("merged_context", "")
         patient_context = state.get("patient_context", "")
         short_term_memory = state.get("short_term_memory", [])
+        long_term_memory = state.get("long_term_memory", [])
 
         connector = get_graphiti_connector()
         graphiti_tools = (
@@ -573,6 +607,7 @@ def generate_answer_node(state: RAGState) -> Dict:
 **도구 사용 지침:**
 - 장기 기억이 필요하면 `graphiti_search_memories` 도구를 호출하여 관련 정보를 탐색하세요.
 - 답변 후에는 동일한 대화를 `graphiti_upsert_memory`로 저장해 향후 상담에 활용하세요.
+- 이미 제공된 장기 기억 단락을 우선 활용하고, 추가 정보가 필요할 때만 도구를 호출하세요.
 
 **답변 원칙:**
 1. 제공된 컨텍스트를 바탕으로 정확하고 근거 있는 답변
@@ -589,6 +624,11 @@ def generate_answer_node(state: RAGState) -> Dict:
                 "**단기 기억:**\n"
                 + "\n\n".join(str(item) for item in short_term_memory)
             )
+        if long_term_memory:
+            formatted_long_term = []
+            for idx, memory in enumerate(long_term_memory, 1):
+                formatted_long_term.append(f"[장기 기억 {idx}]\n{memory}")
+            context_segments.append("**장기 기억:**\n" + "\n\n".join(formatted_long_term))
         if merged_context:
             context_segments.append(f"**참고 자료:**\n{merged_context}")
 
@@ -650,6 +690,12 @@ def evaluate_answer_node(state: RAGState) -> Dict:
         iteration = state.get("iteration", 1)
         max_iterations = state.get("max_iterations", 2)
 
+        metadata = dict(state.get("metadata", {}))
+        graphiti_meta = metadata.get("graphiti")
+        if not isinstance(graphiti_meta, dict):
+            graphiti_meta = {}
+        metadata["graphiti"] = graphiti_meta
+
         if not answer or not merged_context:
             return {
                 "support_score": 0.0,
@@ -707,6 +753,66 @@ def evaluate_answer_node(state: RAGState) -> Dict:
             needs_regeneration = True
 
         session_id = state.get("memory_session_id") or "default"
+
+        connector = get_graphiti_connector()
+        graphiti_meta["enabled"] = connector.is_enabled
+
+        upsert_attempted = False
+        upsert_saved = False
+        upsert_error: str | None = None
+        upsert_reason: str | None = None
+
+        should_update_memory = (
+            connector.is_enabled
+            and support_score >= 3.0
+            and usefulness_score >= 3.0
+            and not answer_quality.should_regenerate
+        )
+
+        if connector.is_enabled and should_update_memory:
+            upsert_attempted = True
+            summary_text = f"지원도 {support_score:.1f}, 유용성 {usefulness_score:.1f}"
+            metadata_payload = {
+                "support_score": support_score,
+                "usefulness_score": usefulness_score,
+                "iteration": iteration,
+                "patient_id": state.get("patient_id"),
+                "crag_action": state.get("crag_action"),
+                "crag_confidence": state.get("crag_confidence"),
+                "internal_docs": len(state.get("internal_docs", [])),
+                "external_docs": len(state.get("external_docs", [])),
+            }
+            try:
+                upsert_saved = connector.upsert_memory_sync(
+                    session_id=session_id,
+                    question=question,
+                    answer=answer,
+                    summary=summary_text,
+                    metadata=metadata_payload,
+                )
+            except Exception as exc:  # pragma: no cover - network except path
+                upsert_error = str(exc)
+        else:
+            if not connector.is_enabled:
+                upsert_reason = "graphiti_disabled"
+            elif answer_quality.should_regenerate:
+                upsert_reason = "pending_regeneration"
+            else:
+                upsert_reason = "quality_below_threshold"
+
+        graphiti_meta["last_upsert"] = {
+            "attempted": upsert_attempted,
+            "saved": upsert_saved,
+        }
+        if upsert_error:
+            graphiti_meta["last_upsert_error"] = upsert_error
+        else:
+            graphiti_meta.pop("last_upsert_error", None)
+        if upsert_reason:
+            graphiti_meta["last_upsert_reason"] = upsert_reason
+        else:
+            graphiti_meta.pop("last_upsert_reason", None)
+
         store = get_short_term_store()
         store.record_interaction(
             session_id=session_id,
@@ -736,6 +842,7 @@ def evaluate_answer_node(state: RAGState) -> Dict:
             "short_term_memory": short_term_segments,
             "answer_quality": answer_quality,
             "regenerate_reason": answer_quality.regenerate_reason,
+            "metadata": metadata,
         }
 
     except Exception as exc:

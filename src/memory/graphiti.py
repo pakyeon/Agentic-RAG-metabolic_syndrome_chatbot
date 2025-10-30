@@ -8,13 +8,15 @@ import json
 import os
 import shlex
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 
 from mcp.types import CallToolResult
+
+T = TypeVar("T")
 
 
 def _parse_json_env(value: str | None, default: Dict[str, Any]) -> Dict[str, Any]:
@@ -102,6 +104,19 @@ class GraphitiMCPConnector:
         self._client_lock = asyncio.Lock()
         self._tools_cache: Dict[str, List[BaseTool]] = {}
 
+    def _run_sync(self, coroutine_factory: Callable[[], Awaitable[T]]) -> T:
+        """Execute an async call in sync context with event loop safety."""
+
+        try:
+            return asyncio.run(coroutine_factory())
+        except RuntimeError:
+            # Fallback for already running loops (e.g., within notebooks)
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coroutine_factory())
+            finally:
+                loop.close()
+
     @property
     def is_enabled(self) -> bool:
         return bool(self.settings.enabled and MultiServerMCPClient is not None)
@@ -187,6 +202,26 @@ class GraphitiMCPConnector:
 
         return {"memories": texts, "diagnostics": diagnostics}
 
+    def search_memories_sync(
+        self,
+        *,
+        session_id: str | None,
+        query: str,
+        limit: int | None = None,
+    ) -> Dict[str, Any]:
+        """Synchronous wrapper around :meth:`search_memories`."""
+
+        if not self.is_enabled:
+            return {"memories": [], "diagnostics": None}
+
+        return self._run_sync(
+            lambda: self.search_memories(
+                session_id=session_id,
+                query=query,
+                limit=limit,
+            )
+        )
+
     async def upsert_memory(
         self,
         *,
@@ -215,6 +250,30 @@ class GraphitiMCPConnector:
         except Exception:  # pragma: no cover - network except path
             return False
         return True
+
+    def upsert_memory_sync(
+        self,
+        *,
+        session_id: str | None,
+        question: str,
+        answer: str,
+        summary: str | None = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> bool:
+        """Synchronous wrapper around :meth:`upsert_memory`."""
+
+        if not self.is_enabled:
+            return False
+
+        return self._run_sync(
+            lambda: self.upsert_memory(
+                session_id=session_id,
+                question=question,
+                answer=answer,
+                summary=summary,
+                metadata=metadata,
+            )
+        )
 
     def build_tools(self, session_id: str) -> List[BaseTool]:
         """Create LangChain tools that proxy Graphiti MCP operations."""
