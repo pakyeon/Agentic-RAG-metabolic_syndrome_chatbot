@@ -90,39 +90,31 @@ class CorrectiveRAG:
 
         # Self-RAG ISREL 평가
         doc_contents = [doc.page_content for doc in documents]
-        overall_eval = self.evaluator.assess_retrieval_quality(
-            query,
-            doc_contents,
+        combined = self.evaluator.evaluate_retrieval_and_decide_action(
+            query=query,
+            documents=doc_contents,
             min_relevant_docs=self.min_relevant_docs,
-            documents_to_evaluate=documents_to_evaluate,
         )
 
-        relevant_count = sum(
-            1
-            for doc_eval in overall_eval.document_evaluations
-            if doc_eval.relevance.relevance == "relevant"
-        )
-        relevance_ratio = relevant_count / len(documents)
-
-        # 액션 결정
-        if (
-            relevant_count >= self.min_relevant_docs
-            and relevance_ratio >= self.relevance_threshold
-        ):
-            # Correct: 충분히 관련성 있음
-            return (
-                CRAGAction.CORRECT,
-                f"관련 문서 {relevant_count}개로 충분합니다. (비율: {relevance_ratio:.1%})",
-            )
-        elif relevant_count == 0:
-            # Incorrect: 관련 문서가 하나도 없음
-            return (CRAGAction.INCORRECT, "관련 문서가 없어 웹 검색으로 대체합니다.")
+        raw_action = (combined.crag_action or "").lower()
+        if raw_action in {action.value for action in CRAGAction}:
+            action_enum = CRAGAction(raw_action)
         else:
-            # Ambiguous: 일부만 관련 있음
-            return (
-                CRAGAction.AMBIGUOUS,
-                f"관련 문서가 {relevant_count}개로 불충분합니다. 웹 검색으로 보완합니다.",
-            )
+            action_enum = CRAGAction.AMBIGUOUS
+
+        reason = combined.reason or ""
+        if not reason:
+            relevant_count = combined.relevant_count
+            if action_enum == CRAGAction.CORRECT:
+                reason = f"관련 문서 {relevant_count}개로 충분합니다."
+            elif action_enum == CRAGAction.AMBIGUOUS:
+                reason = (
+                    f"관련 문서 {relevant_count}개로 불충분합니다. 웹 검색으로 보완합니다."
+                )
+            else:
+                reason = "관련 문서가 없어 웹 검색으로 대체합니다."
+
+        return action_enum, reason
 
     def refine_documents(self, query: str, documents: List[Document]) -> List[Document]:
         """
@@ -139,19 +131,24 @@ class CorrectiveRAG:
         """
         refined_docs = []
 
-        for doc in documents:
-            relevance_result = self.evaluator.evaluate_relevance(
-                query, doc.page_content
-            )
+        combined = self.evaluator.evaluate_retrieval_and_decide_action(
+            query=query,
+            documents=documents,
+            min_relevant_docs=self.min_relevant_docs,
+        )
 
-            if relevance_result.relevance == "relevant":
-                # 메타데이터에 평가 결과 추가
+        evaluation_map = {item.doc_id: item for item in combined.document_evaluations}
+
+        for idx, doc in enumerate(documents, start=1):
+            eval_item = evaluation_map.get(idx)
+            if eval_item and eval_item.relevance == "relevant":
                 doc_copy = Document(
                     page_content=doc.page_content,
                     metadata={
                         **doc.metadata,
                         "crag_relevance": "relevant",
-                        "crag_confidence": relevance_result.confidence,
+                        "crag_confidence": eval_item.confidence,
+                        "crag_score": eval_item.score,
                     },
                 )
                 refined_docs.append(doc_copy)

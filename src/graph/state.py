@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Agentic RAG 그래프 상태 정의"""
 
-from typing import TypedDict, List, Optional, Dict, Any
+from typing import TypedDict, List, Optional, Dict, Any, NotRequired
 from langchain_core.documents import Document
 
 
@@ -28,6 +28,11 @@ class RAGState(TypedDict):
     relevance_scores: List[float]  # ISREL: 문서 관련성 (1-5)
     support_score: float  # ISSUP: 답변 지원도 (1-5)
     usefulness_score: float  # ISUSE: 답변 유용성 (1-5)
+    min_relevant_docs: NotRequired[int]
+    early_stop_enabled: NotRequired[bool]
+    evaluated_docs_count: NotRequired[int]
+    total_evaluated_docs: NotRequired[int]
+    early_stopped: NotRequired[bool]
 
     # CRAG Strategy
     crag_action: str  # correct/incorrect/ambiguous

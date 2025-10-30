@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Any
 
 from langchain.agents import create_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
+
+from src.evaluation.self_rag_evaluator import RelevanceResult
 
 from src.graph.state import RAGState
 from src.memory import get_graphiti_connector, get_short_term_store
@@ -78,18 +80,23 @@ def should_retrieve_node(state: RAGState) -> Dict:
         should_retrieve = result.should_retrieve == "yes"
         documents_to_evaluate = result.documents_to_evaluate if should_retrieve else 0
 
+        metadata = dict(state.get("metadata", {}))
+        metadata.setdefault("min_relevant_docs", 2)
+        metadata.setdefault("early_stop_enabled", bool(documents_to_evaluate))
+        metadata["evaluation_doc_limit"] = documents_to_evaluate
+        metadata["retrieve_decision"] = result.should_retrieve
+        metadata["retrieve_reason"] = result.reason
+        metadata["retrieve_difficulty"] = result.difficulty
+        metadata["retrieve_doc_limit"] = documents_to_evaluate
+
         return {
             "should_retrieve": should_retrieve,
             "iteration": state.get("iteration", 0) + 1,
             "retrieve_difficulty": result.difficulty,
             "evaluation_doc_limit": documents_to_evaluate,
-            "metadata": {
-                **state.get("metadata", {}),
-                "retrieve_decision": result.should_retrieve,
-                "retrieve_reason": result.reason,
-                "retrieve_difficulty": result.difficulty,
-                "retrieve_doc_limit": documents_to_evaluate,
-            },
+            "min_relevant_docs": metadata["min_relevant_docs"],
+            "early_stop_enabled": metadata["early_stop_enabled"],
+            "metadata": metadata,
         }
 
     except Exception as exc:
@@ -97,6 +104,13 @@ def should_retrieve_node(state: RAGState) -> Dict:
             "should_retrieve": True,
             "iteration": state.get("iteration", 0) + 1,
             "error": f"검색 필요성 평가 실패: {exc}",
+            "min_relevant_docs": state.get("min_relevant_docs", 2),
+            "early_stop_enabled": state.get("early_stop_enabled", False),
+            "metadata": {
+                **state.get("metadata", {}),
+                "early_stop_enabled": False,
+                "min_relevant_docs": 2,
+            },
         }
 
 
@@ -139,23 +153,183 @@ def evaluate_retrieval_node(state: RAGState) -> Dict:
         docs = state.get("internal_docs", [])
 
         if not docs:
-            return {"relevance_scores": []}
+            return {
+                "document_evaluations": [],
+                "relevance_scores": [],
+                "crag_action": "incorrect",
+                "crag_reason": "검색 결과 없음",
+                "metadata": {
+                    **state.get("metadata", {}),
+                    "evaluated_docs_count": 0,
+                    "total_docs": 0,
+                    "early_stopped": False,
+                },
+            }
 
-        scores = [
-            evaluator.evaluate_relevance(doc.page_content, state["question"])
-            for doc in docs
+        metadata = dict(state.get("metadata", {}))
+        min_relevant_docs = (
+            state.get("min_relevant_docs") or metadata.get("min_relevant_docs") or 2
+        )
+        early_stop_enabled = bool(
+            state.get("early_stop_enabled", metadata.get("early_stop_enabled", False))
+        )
+        doc_limit = state.get("evaluation_doc_limit") or metadata.get(
+            "evaluation_doc_limit"
+        )
+
+        evaluated_count = len(docs)
+        early_stopped = False
+        limit_for_prompt: int = len(docs)
+
+        if doc_limit and isinstance(doc_limit, int) and doc_limit > 0:
+            limit_for_prompt = min(limit_for_prompt, max(1, doc_limit))
+
+        if early_stop_enabled:
+            partial_results, early_stopped, evaluated_count = (
+                evaluator.evaluate_documents_with_early_stop(
+                    state["question"],
+                    docs,
+                    min_relevant_docs=min_relevant_docs,
+                    enable_early_stop=True,
+                    max_documents=limit_for_prompt,
+                )
+            )
+            if early_stopped:
+                limit_for_prompt = min(limit_for_prompt, evaluated_count)
+            else:
+                limit_for_prompt = min(len(docs), max(limit_for_prompt, evaluated_count))
+        else:
+            evaluated_count = limit_for_prompt
+
+        evaluated_docs = docs[:limit_for_prompt]
+        combined = evaluator.evaluate_retrieval_and_decide_action(
+            state["question"], evaluated_docs, min_relevant_docs=min_relevant_docs
+        )
+
+        def _to_dict(item: Any, idx: int, doc_text: str, reason: str = "") -> Dict[str, Any]:
+            if hasattr(item, "__dict__"):
+                return {
+                    "doc_id": idx,
+                    "document_content": getattr(item, "document_content", doc_text),
+                    "score": float(getattr(item, "score", 0.0)),
+                    "relevance": getattr(item, "relevance", "irrelevant"),
+                    "confidence": float(getattr(item, "confidence", 0.0)),
+                    "reason": getattr(item, "reason", reason),
+                }
+            if isinstance(item, dict):
+                return {
+                    "doc_id": idx,
+                    "document_content": item.get("document_content", doc_text),
+                    "score": float(item.get("score", 0.0)),
+                    "relevance": str(item.get("relevance", "irrelevant")),
+                    "confidence": float(item.get("confidence", 0.0)),
+                    "reason": item.get("reason", reason),
+                }
+            return {
+                "doc_id": idx,
+                "document_content": doc_text,
+                "score": 0.0,
+                "relevance": "irrelevant",
+                "confidence": 0.0,
+                "reason": reason,
+            }
+
+        evaluation_map = {
+            item.doc_id: item for item in combined.document_evaluations if hasattr(item, "doc_id")
+        }
+
+        full_evaluations: List[Dict[str, Any]] = []
+        for idx, doc in enumerate(docs, start=1):
+            doc_text = getattr(doc, "page_content", str(doc))
+            if idx <= limit_for_prompt and idx in evaluation_map:
+                base_item = evaluation_map[idx]
+                full_item = _to_dict(base_item, idx, doc_text)
+            elif idx <= limit_for_prompt:
+                full_item = _to_dict(
+                    {
+                        "doc_id": idx,
+                        "score": 0.0,
+                        "relevance": "irrelevant",
+                        "confidence": 0.0,
+                        "reason": "LLM output missing for this document.",
+                    },
+                    idx,
+                    doc_text,
+                )
+            else:
+                full_item = _to_dict(
+                    {
+                        "doc_id": idx,
+                        "score": 0.0,
+                        "relevance": "not_evaluated",
+                        "confidence": 0.0,
+                        "reason": "Skipped due to early stopping.",
+                    },
+                    idx,
+                    doc_text,
+                )
+            full_evaluations.append(full_item)
+
+        relevance_scores = [
+            RelevanceResult(
+                relevance=item["relevance"],
+                confidence=float(item["confidence"]),
+            )
+            for item in full_evaluations
         ]
 
-        return {"relevance_scores": scores}
+        metadata.update(
+            {
+                "early_stop_enabled": early_stop_enabled,
+                "early_stopped": early_stopped,
+                "evaluated_docs_count": min(evaluated_count, len(docs)),
+                "total_docs": len(docs),
+                "min_relevant_docs": min_relevant_docs,
+                "evaluation_doc_limit": doc_limit,
+                "crag_action": combined.crag_action,
+                "crag_reason": combined.reason,
+            }
+        )
+
+        return {
+            "document_evaluations": full_evaluations,
+            "combined_retrieval_result": combined,
+            "relevance_scores": relevance_scores,
+            "crag_action": combined.crag_action,
+            "crag_reason": combined.reason,
+            "early_stopped": early_stopped,
+            "evaluated_docs_count": min(evaluated_count, len(docs)),
+            "total_evaluated_docs": len(docs),
+            "metadata": metadata,
+        }
 
     except Exception as exc:
-        return {"relevance_scores": [], "error": f"검색 품질 평가 실패: {exc}"}
+        return {
+            "document_evaluations": [],
+            "relevance_scores": [],
+            "error": f"검색 품질 평가 실패: {exc}",
+        }
 
 
 # === CRAG: 액션 결정 ===
 def decide_crag_action_node(state: RAGState) -> Dict:
     """CRAG 전략에 따른 액션 결정."""
     try:
+        if state.get("crag_action"):
+            return {
+                "crag_action": state["crag_action"],
+                "crag_confidence": 1.0,
+                "crag_reason": state.get("crag_reason", ""),
+            }
+
+        combined = state.get("combined_retrieval_result")
+        if combined:
+            return {
+                "crag_action": combined.crag_action,
+                "crag_confidence": 1.0,
+                "crag_reason": combined.reason,
+            }
+
         from src.strategies.corrective_rag import CorrectiveRAG
 
         strategy = CorrectiveRAG()
@@ -164,13 +338,13 @@ def decide_crag_action_node(state: RAGState) -> Dict:
         if not docs:
             return {"crag_action": "incorrect", "crag_confidence": 0.0}
 
-        action, _ = strategy.decide_action(
+        action, reason = strategy.decide_action(
             query=state["question"],
             documents=docs,
             documents_to_evaluate=state.get("evaluation_doc_limit") or None,
         )
 
-        return {"crag_action": action.value, "crag_confidence": 1.0}
+        return {"crag_action": action.value, "crag_confidence": 1.0, "crag_reason": reason}
 
     except Exception as exc:
         return {
@@ -280,6 +454,14 @@ def merge_context_node(state: RAGState) -> Dict:
         action = state.get("crag_action", "correct")
         internal_docs = state.get("internal_docs", [])
         external_docs = state.get("external_docs", [])
+        doc_evaluations = state.get("document_evaluations", [])
+
+        evaluation_map = {}
+        for item in doc_evaluations:
+            if hasattr(item, "doc_id"):
+                evaluation_map[item.doc_id] = item
+            elif isinstance(item, dict) and "doc_id" in item:
+                evaluation_map[int(item["doc_id"])] = item
         relevance_scores = state.get("relevance_scores", [])
 
         final_docs = []
@@ -291,7 +473,23 @@ def merge_context_node(state: RAGState) -> Dict:
         else:
             relevant_internal = []
             for i, doc in enumerate(internal_docs):
-                if i < len(relevance_scores):
+                eval_item = evaluation_map.get(i + 1)
+                if eval_item is not None:
+                    relevance_value = (
+                        eval_item.relevance
+                        if hasattr(eval_item, "relevance")
+                        else str(eval_item.get("relevance", "")).lower()
+                    )
+                    score_value = (
+                        eval_item.score
+                        if hasattr(eval_item, "score")
+                        else eval_item.get("score", 0.0)
+                    )
+                    if relevance_value == "relevant" or (
+                        isinstance(score_value, (float, int)) and score_value >= 3.0
+                    ):
+                        relevant_internal.append(doc)
+                elif i < len(relevance_scores):
                     score = relevance_scores[i]
                     if hasattr(score, "relevance"):
                         if score.relevance == "relevant":
@@ -486,8 +684,9 @@ def evaluate_answer_node(state: RAGState) -> Dict:
             documents=documents,
         )
 
-        support_results = answer_quality["support_results"]
-        usefulness_result = answer_quality["usefulness"]
+        support_results = answer_quality.support_results
+        usefulness_score = float(answer_quality.usefulness_score)
+        usefulness_confidence = float(answer_quality.usefulness_confidence)
 
         support_score = 0.0
         if support_results:
@@ -500,8 +699,6 @@ def evaluate_answer_node(state: RAGState) -> Dict:
                 else:
                     support_scores.append(1.0)
             support_score = sum(support_scores) / len(support_scores)
-
-        usefulness_score = float(usefulness_result.score)
 
         needs_regeneration = False
         if (
@@ -520,6 +717,7 @@ def evaluate_answer_node(state: RAGState) -> Dict:
                 "usefulness_score": usefulness_score,
                 "iteration": iteration,
                 "patient_id": state.get("patient_id"),
+                "answer_quality_usefulness_confidence": usefulness_confidence,
             },
         )
         updated_context = store.get_context(session_id)
@@ -532,8 +730,12 @@ def evaluate_answer_node(state: RAGState) -> Dict:
         return {
             "support_score": support_score,
             "usefulness_score": usefulness_score,
-            "needs_regeneration": needs_regeneration,
+            "needs_regeneration": answer_quality.should_regenerate
+            if iteration >= max_iterations
+            else needs_regeneration or answer_quality.should_regenerate,
             "short_term_memory": short_term_segments,
+            "answer_quality": answer_quality,
+            "regenerate_reason": answer_quality.regenerate_reason,
         }
 
     except Exception as exc:
