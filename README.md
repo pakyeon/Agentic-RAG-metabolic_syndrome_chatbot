@@ -38,6 +38,11 @@ LangGraph 기반 Agentic RAG 시스템으로, Self-RAG의 Reflection Tokens와 C
   - `INCORRECT`: 외부 검색으로 완전 대체
   - `AMBIGUOUS`: 내부/외부 문서 혼합 사용
 
+- **배치 Self-RAG 평가 & CRAG 통합**
+  - `evaluate_relevance_batch` + 조기 종료로 최소 문서만 평가
+  - `evaluate_retrieval_and_decide_action`이 관련성 점수와 CRAG 사유를 동시에 제공
+  - `evaluate_answer_quality`가 ISSUP/ISUSE를 통합하고 재생성 여부를 판단
+
 - **LangGraph 기반 조건부 분기**
   - 검색 필요성에 따른 동적 라우팅
   - CRAG 액션에 따른 외부 검색 제어
@@ -74,45 +79,39 @@ config:
   layout: elk
 ---
 flowchart TB
-    START(["사용자 질문"]) --> LOAD_PATIENT["환자 컨텍스트 로드"]
-    
-    LOAD_PATIENT --> RETRIEVE_DECISION{"Self-RAG<br/>[Retrieve]<br/>검색 필요?"}
-    
-    RETRIEVE_DECISION -- YES --> INTERNAL_SEARCH["내부 VectorDB 검색"]
-    RETRIEVE_DECISION -- NO --> DIRECT_ANSWER["직접 답변 생성"]
-    
-    INTERNAL_SEARCH --> ISREL["Self-RAG<br/>ISREL: 관련성 평가"]
-    
-    ISREL --> CRAG_DECISION{"CRAG 액션 결정"}
-    
-    CRAG_DECISION -- CORRECT<br/>내부 문서 충분 --> MERGE_INTERNAL["내부 문서만 사용"]
-    CRAG_DECISION -- INCORRECT<br/>내부 문서 부족 --> EXTERNAL_SEARCH["Tavily 외부 검색"]
-    CRAG_DECISION -- AMBIGUOUS<br/>혼합 필요 --> EXTERNAL_SEARCH
-    
-    EXTERNAL_SEARCH --> MERGE_MIXED["내부+외부 문서 병합"]
-    
-    MERGE_INTERNAL --> GENERATE["답변 생성"]
+    USER(["사용자 질문"]) --> LOAD_PATIENT["환자 컨텍스트 로드"]
+    LOAD_PATIENT --> LOAD_MEMORY["단기/장기 메모리 컨텍스트 로드"]
+    LOAD_MEMORY --> RETRIEVE_DECISION{"Self-RAG [Retrieve]
+검색 필요?"}
+    RETRIEVE_DECISION -- 예 --> INTERNAL_SEARCH["하이브리드 내부 검색
+(Vector + BM25)"]
+    RETRIEVE_DECISION -- 아니오 --> DIRECT_ANSWER["LLM 답변 생성"]
+    INTERNAL_SEARCH --> ISREL_CRAG["ISREL 평가 + CRAG 결정"]
+    ISREL_CRAG --> CRAG_DECISION{"CRAG 액션"}
+    CRAG_DECISION -- CORRECT --> MERGE_INTERNAL["내부 문서만 병합"]
+    CRAG_DECISION -- AMBIGUOUS/INCORRECT --> EXTERNAL_SEARCH["Tavily 외부 검색"]
+    EXTERNAL_SEARCH --> MERGE_MIXED["내부·외부 문서 병합"]
+    MERGE_INTERNAL --> GENERATE["LLM 답변 생성"]
     MERGE_MIXED --> GENERATE
-    DIRECT_ANSWER --> EVAL_ANSWER
-    
-    GENERATE --> EVAL_ANSWER["Self-RAG<br/>ISSUP/ISUSE: 답변 품질 평가"]
-    
-    EVAL_ANSWER --> QUALITY_CHECK{"품질 기준<br/>충족?"}
-    
-    QUALITY_CHECK -- YES --> END(["최종 답변 반환"])
-    QUALITY_CHECK -- NO<br/>max_iterations 미만 --> INTERNAL_SEARCH
-    QUALITY_CHECK -- NO<br/>max_iterations 도달 --> END
-    
-    style START fill:#e1f5ff
-    style RETRIEVE_DECISION fill:#fff4e1
-    style INTERNAL_SEARCH fill:#e1ffe1
-    style ISREL fill:#f0e1ff
-    style CRAG_DECISION fill:#fff4e1
-    style EXTERNAL_SEARCH fill:#ffe1e1
-    style EVAL_ANSWER fill:#f0e1ff
-    style QUALITY_CHECK fill:#fff4e1
-    style END fill:#e1f5ff
+    DIRECT_ANSWER --> EVAL
+    GENERATE --> EVAL["Self-RAG ISSUP/ISUSE
+답변 품질 평가"]
+    EVAL --> QUALITY_GATE{"품질 기준 충족?"}
+    QUALITY_GATE -- 예 --> FINAL(["최종 답변 반환 + 메모리 업데이트"])
+    QUALITY_GATE -- 아니오 & 반복 가능 --> INTERNAL_SEARCH
+    QUALITY_GATE -- 아니오 & 최대 반복 도달 --> FINAL
+
+    classDef decision fill:#fff4e1,stroke:#b8860b,color:#5b3a00;
+    classDef process fill:#e1ffe1,stroke:#228b22;
+    classDef io fill:#e1f5ff,stroke:#1e88e5;
+    classDef eval fill:#f0e1ff,stroke:#6a1b9a;
+
+    class USER,FINAL io;
+    class LOAD_PATIENT,LOAD_MEMORY,INTERNAL_SEARCH,EXTERNAL_SEARCH,MERGE_INTERNAL,MERGE_MIXED,GENERATE process;
+    class RETRIEVE_DECISION,CRAG_DECISION,QUALITY_GATE decision;
+    class ISREL_CRAG,EVAL eval;
 ```
+
 
 ---
 
@@ -197,25 +196,53 @@ for doc_eval in evaluation.document_evaluations:
     print(f"신뢰도: {doc_eval.relevance.confidence}")
 ```
 
+#### 2-1. **배치 평가 + CRAG 액션 동시 결정**
+```python
+# 최소 문서만 평가하고 싶은 경우 조기 종료 사용
+batch_results, early_stopped, evaluated = evaluator.evaluate_documents_with_early_stop(
+    query="대사증후군 진단 기준은?",
+    documents=retrieved_docs,
+    min_relevant_docs=2,
+)
+if early_stopped:
+    print(f"{evaluated}개 문서만 평가하고 조기 종료")
+
+# Prompt A2 기반 통합 평가: 관련성 + CRAG 액션 + 사유
+combined = evaluator.evaluate_retrieval_and_decide_action(
+    query="대사증후군 진단 기준은?",
+    documents=retrieved_docs[:evaluated or len(retrieved_docs)],
+    min_relevant_docs=2,
+)
+
+print(combined.crag_action)  # correct / incorrect / ambiguous
+print(combined.reason)
+for item in combined.document_evaluations:
+    print(item.doc_id, item.relevance, item.score)
+```
+
 #### 3. **ISSUP - 답변 지원도 평가**
 ```python
-# 답변이 문서에 의해 얼마나 뒷받침되는지 평가
-support = evaluator.evaluate_support(
+# 답변이 문서에 의해 얼마나 뒷받침되는지 평가 (배치)
+support_results = evaluator.evaluate_support_batch(
     query="질문",
-    document="참고 문서",
-    answer="생성된 답변"
+    documents=["참고 문서"],
+    answer="생성된 답변",
 )
-print(f"지원도: {support.score}/5.0")  # 1~5 점수
+print(f"지원도: {support_results[0].support}")  # fully_supported / partially_supported / no_support
 ```
 
 #### 4. **ISUSE - 답변 유용성 평가**
 ```python
-# 답변이 사용자 질문에 얼마나 유용한지 평가
-usefulness = evaluator.evaluate_usefulness(
+# 답변이 사용자 질문에 얼마나 유용한지 평가 (통합 결과 활용)
+answer_quality = evaluator.evaluate_answer_quality(
     query="질문",
-    answer="생성된 답변"
+    answer="생성된 답변",
+    documents=["참고 문서"],
 )
-print(f"유용성: {usefulness.score}/5.0")  # 1~5 점수
+print(f"유용성: {answer_quality.usefulness_score}/5.0")
+print(f"신뢰도: {answer_quality.usefulness_confidence:.2f}")
+print(f"재생성 필요 여부: {answer_quality.should_regenerate}")
+print(f"사유: {answer_quality.regenerate_reason}")
 ```
 
 ### CRAG (Corrective RAG) 전략
@@ -236,6 +263,11 @@ print(result.reason)
 print(result.web_search_performed)
 print(result.documents)  # 최종 사용할 문서 리스트
 ```
+
+CRAG은 Self-RAG 평가 결과를 그대로 활용해 `result.reason`에 LLM 판단 근거를 남기고,
+선별된 문서에는 `crag_relevance`, `crag_confidence`, `crag_score` 메타데이터를 추가합니다.
+LangGraph 노드는 `metadata` 필드에 `early_stopped`, `evaluated_docs_count`, `crag_reason`
+등을 저장해 디버깅과 모니터링을 쉽게 합니다.
 
 **액션 결정 로직:**
 - `CORRECT`: 관련 문서 ≥ min_relevant_docs → 내부 문서만 사용
@@ -466,6 +498,12 @@ print(context)
 ├── .gitignore
 └── README.md
 ```
+
+## ✅ 테스트
+
+- `tests/test_batch_evaluation.py`: 배치 관련성 평가, 조기 종료, 그래프 노드 메타데이터 검증
+- `tests/test_combined_evaluation.py`: CRAG 통합 프롬프트와 답변 품질 통합 평가 단위 테스트
+- `tests/test_self_rag_evaluator.py`: 배치 API로 마이그레이션된 기존 Self-RAG 평가 데모
 
 ---
 
