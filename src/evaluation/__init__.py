@@ -13,6 +13,10 @@ from src.evaluation.self_rag_evaluator import (
     UsefulnessResult,
     DocumentEvaluation,
     OverallEvaluation,
+    DocumentEvaluationWithAction,
+    CombinedEvaluationResult,
+    AnswerQualityResult,
+    BatchResultParseError,
 )
 
 __all__ = [
@@ -24,4 +28,8 @@ __all__ = [
     "UsefulnessResult",
     "DocumentEvaluation",
     "OverallEvaluation",
+    "DocumentEvaluationWithAction",
+    "CombinedEvaluationResult",
+    "AnswerQualityResult",
+    "BatchResultParseError",
 ]

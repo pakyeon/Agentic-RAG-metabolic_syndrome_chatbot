@@ -189,7 +189,9 @@ def demonstrate_edge_cases():
     document = "대사증후군은 복부 비만과 관련이 있습니다."
     wrong_answer = "대사증후군은 특별한 약물 치료가 필요합니다."
 
-    support_result = evaluator.evaluate_support(query, document, wrong_answer)
+    support_result = evaluator.evaluate_support_batch(
+        query, [document], wrong_answer
+    )[0]
     print(f"  지지도 평가: {support_result.support}")
 
     # Case 3: 답변이 유용하지 않은 경우
@@ -197,8 +199,10 @@ def demonstrate_edge_cases():
     query = "대사증후군 치료 방법을 자세히 알려주세요"
     bad_answer = "대사증후군은 복잡한 질환입니다."
 
-    usefulness_result = evaluator.evaluate_usefulness(query, bad_answer)
-    print(f"  유용성 점수: {usefulness_result.score}/5")
+    usefulness_result = evaluator.evaluate_answer_quality(
+        query, bad_answer, [document]
+    )
+    print(f"  유용성 점수: {usefulness_result.usefulness_score}/5")
 
 
 if __name__ == "__main__":

@@ -84,13 +84,15 @@ def test_isrel():
 
     print(f"\n질문: {query}\n")
 
+    results = evaluator.evaluate_relevance_batch(
+        query, [relevant_doc, irrelevant_doc]
+    )
+
     print("관련 있는 문서 평가:")
-    result1 = evaluator.evaluate_relevance(query, relevant_doc)
-    print(f"  결과: {result1.relevance} (신뢰도: {result1.confidence})")
+    print(f"  결과: {results[0].relevance} (신뢰도: {results[0].confidence})")
 
     print("\n관련 없는 문서 평가:")
-    result2 = evaluator.evaluate_relevance(query, irrelevant_doc)
-    print(f"  결과: {result2.relevance} (신뢰도: {result2.confidence})")
+    print(f"  결과: {results[1].relevance} (신뢰도: {results[1].confidence})")
 
 
 def test_issup():
@@ -132,15 +134,19 @@ def test_issup():
     print(f"\n질문: {query}\n")
 
     print("완전히 뒷받침되는 답변 평가:")
-    result1 = evaluator.evaluate_support(query, document, fully_supported_answer)
+    result1 = evaluator.evaluate_support_batch(
+        query, [document], fully_supported_answer
+    )[0]
     print(f"  결과: {result1.support} (신뢰도: {result1.confidence})")
 
     print("\n부분적으로 뒷받침되는 답변 평가:")
-    result2 = evaluator.evaluate_support(query, document, partially_supported_answer)
+    result2 = evaluator.evaluate_support_batch(
+        query, [document], partially_supported_answer
+    )[0]
     print(f"  결과: {result2.support} (신뢰도: {result2.confidence})")
 
     print("\n뒷받침되지 않는 답변 평가:")
-    result3 = evaluator.evaluate_support(query, document, no_support_answer)
+    result3 = evaluator.evaluate_support_batch(query, [document], no_support_answer)[0]
     print(f"  결과: {result3.support} (신뢰도: {result3.confidence})")
 
 
@@ -178,17 +184,22 @@ def test_isuse():
 
     print(f"\n질문: {query}\n")
 
+    documents = [
+        "대사증후군 예방에는 규칙적인 운동, 건강한 식습관, 체중 관리가 중요합니다.",
+        "대사증후군은 복부 비만과 관련이 있습니다.",
+    ]
+
     print("매우 유용한 답변 평가:")
-    result1 = evaluator.evaluate_usefulness(query, excellent_answer)
-    print(f"  점수: {result1.score}/5 (신뢰도: {result1.confidence})")
+    result1 = evaluator.evaluate_answer_quality(query, excellent_answer, documents)
+    print(f"  점수: {result1.usefulness_score}/5 (신뢰도: {result1.usefulness_confidence})")
 
     print("\n보통 답변 평가:")
-    result2 = evaluator.evaluate_usefulness(query, average_answer)
-    print(f"  점수: {result2.score}/5 (신뢰도: {result2.confidence})")
+    result2 = evaluator.evaluate_answer_quality(query, average_answer, documents)
+    print(f"  점수: {result2.usefulness_score}/5 (신뢰도: {result2.usefulness_confidence})")
 
     print("\n유용하지 않은 답변 평가:")
-    result3 = evaluator.evaluate_usefulness(query, poor_answer)
-    print(f"  점수: {result3.score}/5 (신뢰도: {result3.confidence})")
+    result3 = evaluator.evaluate_answer_quality(query, poor_answer, documents)
+    print(f"  점수: {result3.usefulness_score}/5 (신뢰도: {result3.usefulness_confidence})")
 
 
 def test_overall_evaluation():
@@ -233,10 +244,13 @@ def test_overall_evaluation():
         query, generated_answer, documents[:2]  # 관련 있는 문서만 사용
     )
 
+    fully_supported = sum(
+        1 for item in answer_quality.support_results if item.support == "fully_supported"
+    )
     print(f"\n답변 품질 평가:")
-    print(f"  유용성: {answer_quality['usefulness'].score}/5")
-    print(f"  완전히 뒷받침되는 문서 수: {answer_quality['fully_supported_count']}")
-    print(f"  재생성 필요: {answer_quality['should_regenerate']}")
+    print(f"  유용성: {answer_quality.usefulness_score}/5")
+    print(f"  완전히 뒷받침되는 문서 수: {fully_supported}")
+    print(f"  재생성 필요: {answer_quality.should_regenerate}")
 
 
 if __name__ == "__main__":
